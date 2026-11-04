@@ -1,0 +1,30 @@
+# Core scientific & tabular libraries
+numpy>=1.26.0
+pandas>=2.2.0
+matplotlib>=3.8.0
+seaborn>=0.13.0
+scikit-learn>=1.4.0
+
+# Deep learning & Computer Vision
+torch>=2.2.0
+torchvision>=0.17.0
+opencv-python>=4.9.0
+pillow>=10.2.0
+albumentations>=1.4.0
+
+# Object detection & Video Tracking
+ultralytics>=8.1.0
+supervision>=0.20.0
+lap>=0.5.12
+pycocotools>=2.0.7
+
+# Kaggle dataset & submission tools
+kagglehub>=0.3.0
+kaggle>=1.6.0
+
+# Jupyter environment & utilities
+ipykernel>=6.29.0
+ipywidgets>=8.1.0
+tqdm>=4.66.0
+pyyaml>=6.0.0
+python-dotenv>=1.0.0

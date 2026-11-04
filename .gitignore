@@ -1,0 +1,38 @@
+# Virtual environment
+.venv
+.venv/
+env/
+venv/
+
+# Environment secrets & credentials
+.env
+kaggle.json
+*kaggle*.json
+
+# Competition datasets & downloaded files
+data/
+dataset/
+*.zip
+*.tar.gz
+*.mp4
+*.avi
+*.partial
+*.kaggle-partial
+
+# Submissions & model weights/checkpoints
+submission*.csv
+test_tracking_detections.csv
+checkpoints/
+runs/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.bin
+
+# Python / Jupyter caches
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.ruff_cache/
+.DS_Store

@@ -1,0 +1,13 @@
+path: /Users/rudko/.cache/kagglehub/competitions/multiple-object-video-detection-hw-2-ucu-ai-2026
+train: /Users/rudko/.cache/kagglehub/competitions/multiple-object-video-detection-hw-2-ucu-ai-2026/train/images
+val: /Users/rudko/.cache/kagglehub/competitions/multiple-object-video-detection-hw-2-ucu-ai-2026/val/images
+nc: 8
+names:
+- person
+- bicycle
+- car
+- van
+- truck
+- tricycle
+- bus
+- motor

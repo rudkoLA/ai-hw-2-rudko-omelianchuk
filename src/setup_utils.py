@@ -1,0 +1,198 @@
+"""setup_utils.py
+Standardized environment configuration, hardware detection, Google Drive
+persistence, and automated Kaggle competition dataset acquisition.
+"""
+
+import os
+import sys
+import json
+import random
+import subprocess
+import zipfile
+from pathlib import Path
+from typing import Dict, Any, Tuple, List, Optional, Union
+import yaml
+import torch
+import numpy as np
+
+COMPETITION_NAME = "multiple-object-video-detection-hw-2-ucu-ai-2026"
+
+CANDIDATE_DATASET_DIRS = [
+    Path("dataset"),
+    Path("/content/dataset"),
+    Path("/content/ai-lab2/dataset"),
+    Path.home() / ".cache" / "kagglehub" / "competitions" / COMPETITION_NAME,
+    Path("/kaggle/input") / COMPETITION_NAME,
+    Path("/kaggle/input") / "multiple-object-video-detection",
+    Path("data"),
+]
+
+
+def setup_environment(
+    seed: int = 42,
+    mount_gdrive: bool = True,
+    gdrive_folder: str = "ai_lab2_checkpoints"
+) -> Dict[str, Any]:
+    """
+    Initializes deterministic seeds, configures hardware profile,
+    and optionally mounts Google Drive if executing within Google Colab.
+    """
+    # Deterministic seeding
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    # Hardware detection
+    is_cuda = torch.cuda.is_available()
+    is_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+
+    if is_cuda:
+        device = torch.device("cuda")
+        gpu_name = torch.cuda.get_device_name(0)
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        print(f"[Environment]: CUDA GPU ({gpu_name}, {vram_gb:.1f} GB VRAM) -> Mixed Precision (AMP Enabled)")
+    elif is_mps:
+        device = torch.device("mps")
+        print("[Environment]: Apple Silicon (Metal Performance Shaders - MPS)")
+    else:
+        device = torch.device("cpu")
+        print("[Environment]: CPU Only")
+
+    # Colab Google Drive persistence
+    gdrive_dir: Optional[Path] = None
+    if mount_gdrive and Path("/content").exists():
+        try:
+            from google.colab import drive
+            drive.mount("/content/drive")
+            gdrive_dir = Path("/content/drive/MyDrive") / gdrive_folder
+            gdrive_dir.mkdir(parents=True, exist_ok=True)
+            print(f"[Google Drive]: Mounted! Checkpoints will persist in: {gdrive_dir}")
+        except Exception as e:
+            print(f"[Google Drive]: Mount skipped or unavailable ({type(e).__name__})")
+
+    # Import hardware config from src.dataset if present
+    hw_cfg: Dict[str, Any] = {}
+    try:
+        from src.dataset import get_hardware_config
+        hw_cfg = get_hardware_config()
+    except ImportError:
+        hw_cfg = {
+            "device": device,
+            "is_cuda": is_cuda,
+            "is_mps": is_mps,
+            "use_amp": is_cuda,
+            "batch_size": 2 if is_cuda else 1,
+            "input_size": (1024, 1024) if is_cuda else (640, 640),
+            "num_workers": 4 if is_cuda else 0
+        }
+
+    return {
+        "device": device,
+        "is_cuda": is_cuda,
+        "is_mps": is_mps,
+        "hw_cfg": hw_cfg,
+        "gdrive_dir": gdrive_dir,
+        "seed": seed
+    }
+
+
+def ensure_dataset(
+    custom_dir: Optional[Union[str, Path]] = None,
+    auto_download: bool = True
+) -> Tuple[Path, Dict[str, Any], Dict[str, Any], List[str]]:
+    """
+    Locates or automatically downloads the competition dataset.
+    Returns:
+        dataset_dir: Path to dataset root containing 'train' and 'val'
+        coco_train: Parsed COCO json dictionary for training split
+        coco_val: Parsed COCO json dictionary for validation split
+        class_names: List of target class name strings
+    """
+    resolved_dir: Optional[Path] = None
+
+    # Check custom path first
+    if custom_dir is not None:
+        p = Path(custom_dir)
+        if p.exists() and (p / "train" / "annotations_coco.json").exists():
+            resolved_dir = p
+
+    # Check known candidate locations
+    if resolved_dir is None:
+        for c in CANDIDATE_DATASET_DIRS:
+            if c.exists() and (c / "train" / "annotations_coco.json").exists():
+                resolved_dir = c
+                break
+
+    # If still not found, download via Kaggle
+    if resolved_dir is None and auto_download:
+        print(f"--> Dataset not found locally. Preparing download for '{COMPETITION_NAME}'...")
+
+        # Setup Kaggle credentials if local file exists
+        kaggle_json = Path("kaggle.json")
+        dest_kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
+        if kaggle_json.exists() and not dest_kaggle_json.exists():
+            dest_kaggle_json.parent.mkdir(parents=True, exist_ok=True)
+            with open(kaggle_json) as f_in, open(dest_kaggle_json, "w") as f_out:
+                f_out.write(f_in.read())
+            dest_kaggle_json.chmod(0o600)
+            print("--> Configured ~/.kaggle/kaggle.json credentials.")
+
+        # Attempt download via official Kaggle CLI
+        zip_name = f"{COMPETITION_NAME}.zip"
+        target_dir = Path("/content/dataset") if Path("/content").exists() else Path("dataset")
+
+        try:
+            print("--> Downloading competition archive via Kaggle CLI...")
+            subprocess.run(
+                [sys.executable, "-m", "kaggle", "competitions", "download", "-c", COMPETITION_NAME],
+                check=True
+            )
+            print(f"--> Extracting archive into {target_dir}...")
+            target_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(zip_name, "r") as zf:
+                zf.extractall(target_dir)
+            resolved_dir = target_dir
+            print(f"--> Dataset extracted successfully to: {resolved_dir}")
+        except Exception as e_cli:
+            print(f"--> Kaggle CLI returned: {e_cli}. Attempting kagglehub fallback...")
+            try:
+                import kagglehub
+                dataset_path_str = kagglehub.competition_download(COMPETITION_NAME)
+                resolved_dir = Path(dataset_path_str)
+                print(f"--> kagglehub download successful: {resolved_dir}")
+            except Exception as e_hub:
+                raise RuntimeError(
+                    f"Failed to automatically retrieve dataset. Please ensure Kaggle API "
+                    f"credentials are set (~/.kaggle/kaggle.json) or run 'kaggle competitions download -c {COMPETITION_NAME}' manually.\n"
+                    f"Errors: CLI ({e_cli}), Hub ({e_hub})"
+                )
+
+    if resolved_dir is None:
+        raise FileNotFoundError(
+            f"Could not locate dataset root directory with train/annotations_coco.json in {CANDIDATE_DATASET_DIRS}"
+        )
+
+    print(f"[Dataset]: Resolved dataset root at -> {resolved_dir}")
+
+    # Load annotations
+    train_anno_path = resolved_dir / "train" / "annotations_coco.json"
+    val_anno_path = resolved_dir / "val" / "annotations_coco.json"
+
+    with open(train_anno_path, "r") as f:
+        coco_train = json.load(f)
+    with open(val_anno_path, "r") as f:
+        coco_val = json.load(f)
+
+    # Load class names from data.yaml if available, else derive from annotations
+    yaml_path = resolved_dir / "train" / "data.yaml"
+    if yaml_path.exists():
+        with open(yaml_path, "r") as f:
+            data_yaml = yaml.safe_load(f)
+        class_names = data_yaml.get("names", [])
+    else:
+        cats = sorted(coco_train.get("categories", []), key=lambda c: c["id"])
+        class_names = [c["name"] for c in cats]
+
+    return resolved_dir, coco_train, coco_val, class_names
