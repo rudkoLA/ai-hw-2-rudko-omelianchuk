@@ -1,0 +1,11 @@
+# VisDrone-Tuned ByteTrack Configuration
+# Specially optimized for aerial UAV video tracking with small targets,
+# drone ego-motion, and intermittent camera panning/occlusion.
+
+tracker_type: bytetrack      # Backend: ByteTrack (two-stage association)
+track_high_thresh: 0.25      # Lowered from 0.50/0.60: aerial micro-targets (cars/pedestrians) often score 0.25-0.45
+track_low_thresh: 0.08       # Low-score second association threshold: recovers weak detections during motion blur
+new_track_thresh: 0.28       # Minimum confidence to initialize a brand-new trajectory (rejects road artifacts)
+track_buffer: 45             # 45 frames (~1.5 sec at 30fps): keeps lost tracks alive during drone banking / occlusion
+match_thresh: 0.70           # Loosened association IoU threshold: accommodates drone camera ego-motion displacement
+fuse_score: True             # Fuse detection confidence with spatial motion IoU for stable association
