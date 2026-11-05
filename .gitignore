@@ -21,7 +21,7 @@ dataset/
 
 # Submissions & model weights/checkpoints
 submission*.csv
-test_tracking_detections.csv
+test_tracking_detections*.csv
 checkpoints/
 runs/
 *.pt

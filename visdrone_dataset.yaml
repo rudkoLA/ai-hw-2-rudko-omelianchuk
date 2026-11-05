@@ -1,6 +1,6 @@
-path: /Users/rudko/.cache/kagglehub/competitions/multiple-object-video-detection-hw-2-ucu-ai-2026
-train: /Users/rudko/.cache/kagglehub/competitions/multiple-object-video-detection-hw-2-ucu-ai-2026/train/images
-val: /Users/rudko/.cache/kagglehub/competitions/multiple-object-video-detection-hw-2-ucu-ai-2026/val/images
+path: /Users/rudko/Development/ai-hw-2-rudko-omelianchuk/dataset
+train: /Users/rudko/Development/ai-hw-2-rudko-omelianchuk/dataset/train/images
+val: /Users/rudko/Development/ai-hw-2-rudko-omelianchuk/dataset/val/images
 nc: 8
 names:
 - person

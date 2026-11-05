@@ -292,14 +292,53 @@ def generate_yolo_submission(
 
     # Build official Kaggle submission in exact test_images.csv order
     submission_rows = []
+    empty_backfilled = 0
     for _, item in df_test.iterrows():
         img_id = str(item["image_id"])
         pred_tokens = det_by_image.get(img_id, [])
+        if not pred_tokens:
+            # Kaggle submission parser strictly rejects empty strings as NaN.
+            # Backfill with low-confidence detection or center candidate.
+            orig_w = float(item["width"])
+            orig_h = float(item["height"])
+            img_path = dataset_dir / item["file_name"]
+            token = None
+            if img_path.exists() and hasattr(model, "predict"):
+                try:
+                    res_fb = model.predict(
+                        source=str(img_path),
+                        conf=0.001,
+                        imgsz=imgsz,
+                        device=device,
+                        verbose=False,
+                    )[0]
+                    if len(res_fb.boxes) > 0:
+                        top_idx = int(res_fb.boxes.conf.argmax().item())
+                        cl_fb = int(res_fb.boxes.cls[top_idx].item())
+                        c_fb = float(res_fb.boxes.conf[top_idx].item())
+                        b_fb = res_fb.boxes.xyxy[top_idx].cpu().numpy()
+                        x1_fb = max(0.0, float(b_fb[0]))
+                        y1_fb = max(0.0, float(b_fb[1]))
+                        w_fb = max(1.0, min(float(b_fb[2]), orig_w) - x1_fb)
+                        h_fb = max(1.0, min(float(b_fb[3]), orig_h) - y1_fb)
+                        token = f"{cl_fb} {c_fb:.4f} {x1_fb:.1f} {y1_fb:.1f} {w_fb:.1f} {h_fb:.1f}"
+                except Exception:
+                    token = None
+            if not token:
+                token = f"3 0.0100 {orig_w / 2:.1f} {orig_h / 2:.1f} 50.0 50.0"
+            pred_tokens = [token]
+            empty_backfilled += 1
+
         submission_rows.append(
             {
                 "image_id": img_id,
                 "PredictionString": " ".join(pred_tokens),
             }
+        )
+
+    if empty_backfilled > 0 and verbose:
+        print(
+            f"--> Automatically backfilled {empty_backfilled} zero-detection frames to guarantee zero nulls."
         )
 
     sub_df = pd.DataFrame(submission_rows)
@@ -346,8 +385,9 @@ def validate_submission_file(
     unique_ids = int(df["image_id"].nunique()) if "image_id" in df.columns else 0
     duplicate_count = total_rows - unique_ids
 
-    # Check nulls in image_id
+    # Check nulls in image_id and PredictionString
     null_ids = int(df["image_id"].isnull().sum()) if "image_id" in df.columns else total_rows
+    null_preds = int(df["PredictionString"].isnull().sum()) if "PredictionString" in df.columns else total_rows
 
     # Check prediction formatting
     valid_syntax = True
@@ -375,6 +415,7 @@ def validate_submission_file(
         and total_rows == 3811
         and duplicate_count == 0
         and null_ids == 0
+        and null_preds == 0
         and valid_syntax
         and images_with_detections > 0
     )
