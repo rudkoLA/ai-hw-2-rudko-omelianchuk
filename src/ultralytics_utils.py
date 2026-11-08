@@ -76,8 +76,10 @@ def predict_coco(
     batch: int = 8,
     device: Any = None,
 ) -> Tuple[List[Dict[str, Any]], float]:
-    """Runs an Ultralytics model on COCO image records and returns COCO-format detections.
+    """Runs an Ultralytics model on image records and returns COCO-format detections.
 
+    `frames` are dicts with "id" and "file_name" (relative to `image_root`): COCO image
+    records for val, or src.submission.load_test_frames() for the test set.
     Boxes come back in original pixel coordinates; YOLO class ids (0-based) are mapped to
     COCO category ids (1-based).
 
@@ -106,7 +108,7 @@ def predict_coco(
             ):
                 records.append(
                     {
-                        "image_id": int(img["id"]),
+                        "image_id": img["id"],
                         "category_id": cls + 1,
                         "bbox": [x1, y1, x2 - x1, y2 - y1],
                         "score": float(score),
