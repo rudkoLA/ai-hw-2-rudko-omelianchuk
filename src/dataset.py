@@ -14,6 +14,29 @@ from torch.utils.data import DataLoader, Dataset
 from src.preprocessing import letterbox
 
 
+def select_frames(
+    images: List[Dict[str, Any]],
+    stride: int = 1,
+    sequence_names: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Selects COCO image records: grouped by sequence, sorted by frame, every `stride`-th frame.
+
+    Shared by VisDroneDataset and the Ultralytics list writer so that every
+    framework trains and evaluates on exactly the same frames.
+    """
+    images_by_seq: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for img in images:
+        vid = str(img["video"])
+        if sequence_names is None or vid in sequence_names:
+            images_by_seq[vid].append(img)
+
+    samples: List[Dict[str, Any]] = []
+    for vid in sorted(images_by_seq.keys()):
+        frames = sorted(images_by_seq[vid], key=lambda x: int(x["frame_id"]))
+        samples.extend(frames[::stride] if stride > 1 else frames)
+    return samples
+
+
 class VisDroneDataset(Dataset[Tuple[torch.Tensor, Dict[str, Any]]]):
     """PyTorch Dataset for VisDrone video sequences supporting GroupKFold and frame strides.
 
@@ -59,20 +82,10 @@ class VisDroneDataset(Dataset[Tuple[torch.Tensor, Dict[str, Any]]]):
         with open(coco_path, "r") as f:
             self.coco_dict: Dict[str, Any] = json.load(f)
 
-        # Group images by video sequence
-        images_by_seq: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        for img in self.coco_dict["images"]:
-            vid = str(img["video"])
-            if sequence_names is None or vid in sequence_names:
-                images_by_seq[vid].append(img)
-
-        # Sort frames temporally per sequence and apply stride subsampling
-        self.samples: List[Dict[str, Any]] = []
-        for vid in sorted(images_by_seq.keys()):
-            sorted_frames = sorted(images_by_seq[vid], key=lambda x: int(x["frame_id"]))
-            if stride > 1:
-                sorted_frames = sorted_frames[::stride]
-            self.samples.extend(sorted_frames)
+        # Temporally sorted, stride-subsampled frames per sequence
+        self.samples: List[Dict[str, Any]] = select_frames(
+            self.coco_dict["images"], stride=stride, sequence_names=sequence_names
+        )
 
         # Pre-index target annotations by image_id
         selected_img_ids = set(img["id"] for img in self.samples)

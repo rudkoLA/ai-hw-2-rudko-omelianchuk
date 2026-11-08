@@ -196,3 +196,35 @@ def ensure_dataset(
         class_names = [c["name"] for c in cats]
 
     return resolved_dir, coco_train, coco_val, class_names
+
+
+def resolve_storage(
+    runtime: str,
+    subdir: str,
+    local_root: Union[str, Path] = "runs",
+    gdrive_folder: str = "ai_lab2_checkpoints",
+) -> Path:
+    """Returns a persistent directory for checkpoints and logs of one checkpoint/experiment.
+
+    Args:
+        runtime: "colab" (mounts Google Drive, stores under MyDrive/<gdrive_folder>)
+            or "local" (stores under <local_root>). Chosen explicitly, never auto-detected.
+        subdir: Sub-directory for this notebook, e.g. "cp5_rtdetr".
+        local_root: Root directory used when runtime == "local".
+        gdrive_folder: Folder inside MyDrive used when runtime == "colab".
+    """
+    if runtime == "colab":
+        from google.colab import drive  # type: ignore[import-not-found]
+
+        if not Path("/content/drive/MyDrive").exists():
+            drive.mount("/content/drive")
+        root = Path("/content/drive/MyDrive") / gdrive_folder
+    elif runtime == "local":
+        root = Path(local_root)
+    else:
+        raise ValueError(f"runtime must be 'colab' or 'local', got {runtime!r}")
+
+    out = (root / subdir).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    print(f"[Storage]: {runtime} -> {out}")
+    return out
