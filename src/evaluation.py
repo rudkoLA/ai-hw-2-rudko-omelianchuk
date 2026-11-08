@@ -115,49 +115,70 @@ def evaluate_coco_metrics(
     coco_gt: COCO,
     predictions: List[Dict[str, Any]],
     image_ids: Optional[List[int]] = None,
+    max_dets: int = 500,
 ) -> Dict[str, float]:
     """Runs official COCOeval benchmark and returns standardized metrics dictionary.
+
+    Ignored regions are stored in the GT json as ``iscrowd=1`` annotations (one copy
+    per class), so COCOeval already treats detections inside them as "don't care".
 
     Args:
         coco_gt: Initialized pycocotools COCO object for ground truth.
         predictions: List of prediction records in COCO result format.
-        image_ids: Optional list of image IDs to evaluate on.
+        image_ids: Optional list of image IDs to evaluate on. Pass the exact frames
+            that were predicted, otherwise unpredicted frames count as misses.
+        max_dets: Max detections per image used for AP/AR. COCO's default of 100 is
+            too low for VisDrone (up to ~116 GT objects per val frame) and the
+            competition scores up to 500, so 500 is the default here.
 
     Returns:
-        Dictionary with mAP_50_95, mAP_50, mAP_75, mAP_small, mAP_medium, mAP_large, mAR_100.
+        Dictionary with mAP_50_95, mAP_50, mAP_75, mAP_small, mAP_medium, mAP_large,
+        mAR (at ``max_dets``), mAR_small, mAR_medium, mAR_large. ``mAR_100`` is kept
+        as a backward-compatible alias of ``mAR``.
     """
+    keys = [
+        "mAP_50_95", "mAP_50", "mAP_75", "mAP_small", "mAP_medium", "mAP_large",
+        "mAR", "mAR_small", "mAR_medium", "mAR_large",
+    ]
     if not predictions:
-        return {
-            "mAP_50_95": 0.0,
-            "mAP_50": 0.0,
-            "mAP_75": 0.0,
-            "mAP_small": 0.0,
-            "mAP_medium": 0.0,
-            "mAP_large": 0.0,
-            "mAR_100": 0.0,
-        }
+        out = {k: 0.0 for k in keys}
+        out["mAR_100"] = 0.0
+        return out
 
     # Load predictions into COCO evaluation structure
     coco_dt = coco_gt.loadRes(predictions)  # pyright: ignore[reportArgumentType]
     coco_eval = COCOeval(coco_gt, coco_dt, iouType="bbox")
 
     if image_ids is not None:
-        coco_eval.params.imgIds = image_ids
+        coco_eval.params.imgIds = sorted(set(image_ids))
+    # summarize() reads AP and AR@all/size from maxDets[2]
+    coco_eval.params.maxDets = [1, 10, int(max_dets)]
 
     coco_eval.evaluate()
     coco_eval.accumulate()
     coco_eval.summarize()
 
     stats = coco_eval.stats
-    return {
-        "mAP_50_95": float(stats[0]),
+    # pycocotools hard-codes maxDets=100 for stats[0] (returns -1 when 100 is not in
+    # params.maxDets), so compute mAP@[.5:.95] directly from the precision array
+    # (shape [T, R, K, A, M]; area index 0 = "all", maxDets index 2 = max_dets).
+    prec = coco_eval.eval["precision"][:, :, :, 0, 2]
+    valid = prec[prec > -1]
+    map_50_95 = float(np.mean(valid)) if valid.size else -1.0
+    out = {
+        "mAP_50_95": map_50_95,
         "mAP_50": float(stats[1]),
         "mAP_75": float(stats[2]),
         "mAP_small": float(stats[3]),
         "mAP_medium": float(stats[4]),
         "mAP_large": float(stats[5]),
-        "mAR_100": float(stats[8]),
+        "mAR": float(stats[8]),
+        "mAR_small": float(stats[9]),
+        "mAR_medium": float(stats[10]),
+        "mAR_large": float(stats[11]),
     }
+    out["mAR_100"] = out["mAR"]  # backward-compatible key used by notebook 02
+    return out
 
 
 def generate_yolo_submission(
