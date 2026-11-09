@@ -113,9 +113,18 @@ def validate_submission(
 
 
 def submit_to_kaggle(submission_path: Union[str, Path], message: str) -> None:
-    """Uploads a submission with the Kaggle CLI (needs ~/.kaggle/kaggle.json)."""
-    subprocess.run(
+    """Uploads a submission with the Kaggle CLI.
+
+    Credentials: ~/.kaggle/kaggle.json, or KAGGLE_USERNAME + KAGGLE_KEY, or KAGGLE_API_TOKEN
+    (newer CLI versions only). The CLI's own output is captured so errors show up in the notebook.
+    """
+    result = subprocess.run(
         [sys.executable, "-m", "kaggle", "competitions", "submit",
          "-c", COMPETITION_NAME, "-f", str(submission_path), "-m", message],
-        check=True,
+        capture_output=True,
+        text=True,
     )
+    output = "\n".join(s.strip() for s in (result.stdout, result.stderr) if s.strip())
+    if result.returncode != 0:
+        raise RuntimeError(f"Kaggle submission failed (exit code {result.returncode}):\n{output}")
+    print(output)
