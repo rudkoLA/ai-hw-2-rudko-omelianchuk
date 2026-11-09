@@ -95,9 +95,14 @@ def predict_coco(
     `predict_kwargs` are extra model.predict() arguments, e.g. {"iou": 0.6} (NMS IoU threshold) or
     {"nms": False} (YOLO26: NMS-free one-to-one head instead of one-to-many head + NMS).
 
+    `batch` < 1 (e.g. Ultralytics' batch=-1 auto-batch, which only applies to training) falls back to 16.
+
     Returns:
         (records for evaluate_coco_metrics, mean inference time in ms per frame).
     """
+    if not frames:
+        raise ValueError("predict_coco got no frames to predict")
+    batch = batch if batch >= 1 else 16
     image_root = Path(image_root)
     records: List[Dict[str, Any]] = []
     total_ms = 0.0
@@ -211,7 +216,7 @@ def evaluate_run(
     metrics.update(
         {
             "ms_per_frame": ms_per_frame,
-            "fps": 1000.0 / ms_per_frame,
+            "fps": 1000.0 / ms_per_frame if ms_per_frame > 0 else float("nan"),
             "params_M": sum(p.numel() for p in model.model.parameters()) / 1e6,
         }
     )
