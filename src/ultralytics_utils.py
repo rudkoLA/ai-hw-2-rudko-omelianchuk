@@ -20,7 +20,7 @@ def write_yolo_split(
     coco_by_split: Dict[str, Dict[str, Any]],
     out_dir: Union[str, Path],
     class_names: List[str],
-    stride: int = 3,
+    stride: Union[int, Dict[str, int]] = 3,
 ) -> Tuple[Path, Dict[str, List[Dict[str, Any]]]]:
     """Writes Ultralytics image lists + data.yaml for the same frames the torchvision pipeline uses.
 
@@ -31,7 +31,8 @@ def write_yolo_split(
         coco_by_split: {"train": coco_dict, "val": coco_dict}.
         out_dir: Where to write <split>.txt and data.yaml.
         class_names: Class names in YOLO id order (0..7).
-        stride: Temporal subsampling step (every `stride`-th frame per sequence).
+        stride: Temporal subsampling step (every `stride`-th frame per sequence); an int for all
+            splits or a per-split dict, e.g. {"train": 15, "val": 3}.
 
     Returns:
         (path to data.yaml, {split: selected COCO image records}).
@@ -41,10 +42,11 @@ def write_yolo_split(
 
     frames: Dict[str, List[Dict[str, Any]]] = {}
     for split, coco in coco_by_split.items():
-        frames[split] = select_frames(coco["images"], stride=stride)
+        split_stride = stride[split] if isinstance(stride, dict) else stride
+        frames[split] = select_frames(coco["images"], stride=split_stride)
         paths = [str(dataset_dir / split / img["file_name"]) for img in frames[split]]
         (out_dir / f"{split}.txt").write_text("\n".join(paths) + "\n")
-        print(f"[{split}]: {len(paths):,} frames (stride={stride}) -> {out_dir / f'{split}.txt'}")
+        print(f"[{split}]: {len(paths):,} frames (stride={split_stride}) -> {out_dir / f'{split}.txt'}")
 
     data_yaml = out_dir / "data.yaml"
     data_yaml.write_text(
