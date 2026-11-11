@@ -14,6 +14,7 @@ albumentations>=1.4.0
 
 # Object detection & Video Tracking
 ultralytics>=8.1.0
+transformers>=4.52.0
 supervision>=0.20.0
 lap>=0.5.12
 pycocotools>=2.0.7
