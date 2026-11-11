@@ -13,6 +13,8 @@ from ultralytics.utils import RANK
 from ultralytics.utils.loss import BboxLoss, E2ELoss
 from ultralytics.utils.metrics import bbox_iou
 
+from src.ignore_mask import masked_train_dataset
+
 IOU_TYPES = ("CIoU", "DIoU", "GIoU", "IoU")
 
 
@@ -78,8 +80,12 @@ def make_yolo_trainer(
     tal_topk: int = 10,
     stal_min_side: Optional[float] = None,
     iou_type: str = "CIoU",
+    mask_ignore: bool = False,
 ) -> Type[DetectionTrainer]:
-    """Builds a DetectionTrainer subclass that trains a TunedDetectionModel with the given settings."""
+    """Builds a DetectionTrainer subclass that trains a TunedDetectionModel with the given settings.
+
+    mask_ignore: Fill ignored regions of training images with gray (see src/ignore_mask.py).
+    """
 
     class Trainer(DetectionTrainer):
         def get_model(self, cfg=None, weights=None, verbose=True):
@@ -96,5 +102,9 @@ def make_yolo_trainer(
             if weights:
                 model.load(weights)
             return model
+
+        def build_dataset(self, img_path, mode="train", batch=None):
+            with masked_train_dataset(mask_ignore, mode):
+                return super().build_dataset(img_path, mode, batch)
 
     return Trainer

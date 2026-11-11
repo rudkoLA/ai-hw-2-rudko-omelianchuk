@@ -14,6 +14,8 @@ from ultralytics.models.utils.ops import HungarianMatcher
 from ultralytics.nn.tasks import RTDETRDetectionModel, yaml_model_load
 from ultralytics.utils import RANK
 
+from src.ignore_mask import masked_train_dataset
+
 # Ultralytics defaults (DETRLoss / HungarianMatcher)
 DEFAULT_MATCHER_COST = {"class": 2.0, "bbox": 5.0, "giou": 2.0}
 DEFAULT_LOSS_GAIN = {"class": 1.0, "bbox": 5.0, "giou": 2.0}
@@ -66,6 +68,7 @@ def make_rtdetr_trainer(
     matcher_cost: Optional[Dict[str, float]] = None,
     loss_gain: Optional[Dict[str, float]] = None,
     backbone_lr_mult: float = 1.0,
+    mask_ignore: bool = False,
 ) -> Type[RTDETRTrainer]:
     """Builds an RTDETRTrainer subclass bound to the given model config and tuning knobs.
 
@@ -74,6 +77,7 @@ def make_rtdetr_trainer(
         matcher_cost: Hungarian matching cost weights {"class", "bbox", "giou"}.
         loss_gain: Loss weights {"class", "bbox", "giou"}.
         backbone_lr_mult: Backbone LR = lr0 * backbone_lr_mult (rest of the model uses lr0).
+        mask_ignore: Fill ignored regions of training images with gray (see src/ignore_mask.py).
     """
     n_backbone = len(model_cfg["backbone"])
 
@@ -92,6 +96,10 @@ def make_rtdetr_trainer(
             if weights:
                 model.load(weights)
             return model
+
+        def build_dataset(self, img_path, mode="train", batch=None):
+            with masked_train_dataset(mask_ignore, mode):
+                return super().build_dataset(img_path, mode, batch)
 
         def build_optimizer(self, model, name="auto", lr=0.001, momentum=0.9, decay=1e-5, iterations=1e5):
             optimizer = super().build_optimizer(model, name, lr, momentum, decay, iterations)
