@@ -112,15 +112,28 @@ class RandomZoomCrop:
         return img, clipped[keep], [labels[i] for i in np.flatnonzero(keep)]
 
 
-def get_dfine_train_transforms(strong: bool = True) -> A.Compose:
+def get_dfine_train_transforms(strong: bool = True, downscale_p: float = 0.0) -> A.Compose:
     """Augmentations applied to the letterboxed image for D-FINE (pascal_voc boxes).
 
     Compared with get_train_transforms: no rotation (rotating axis-aligned boxes makes them loose,
     which costs AP at high IoU) and min_area=1 (min_area=16 silently dropped the tiniest VisDrone objects).
-    Zoom-in comes from RandomZoomCrop on the original image. `strong=False` keeps only the flip,
-    for the final no-augmentation epochs (as D-FINE's own `stop_epoch` policy does).
+    Zoom-in comes from RandomZoomCrop on the original image. `strong=False` keeps only the flip (and the
+    downscale below), for the final no-augmentation epochs (as D-FINE's own `stop_epoch` policy does).
+
+    `downscale_p`: probability of shrinking the letterboxed image to 40-80% and enlarging it back
+    (INTER_AREA down, INTER_LINEAR up, the same interpolation letterbox uses). This imitates test frames
+    from low-resolution sources: 66% of test frames are <= 1360 px wide (incl. 680x382 and 960x540, absent
+    from training) and get upscaled by letterboxing, while training frames are mostly 1904-2688 px wide.
+    It describes the test distribution rather than acting as a regulariser, so it stays on in the
+    no-augmentation epochs too.
     """
     ops = [A.HorizontalFlip(p=0.5)]
+    if downscale_p > 0:
+        ops.append(A.Downscale(
+            scale_range=(0.4, 0.8),
+            interpolation_pair={"downscale": cv2.INTER_AREA, "upscale": cv2.INTER_LINEAR},
+            p=downscale_p,
+        ))
     if strong:
         ops += [
             A.Affine(scale=(0.8, 1.1), translate_percent=(-0.05, 0.05), p=0.5),

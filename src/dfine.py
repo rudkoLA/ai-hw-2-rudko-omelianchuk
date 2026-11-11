@@ -329,7 +329,7 @@ def train_dfine(cfg: Dict[str, Any], dataset_dir: Union[str, Path], run_dir: Uni
     def make_train_loader(strong_aug: bool) -> DataLoader:
         ds = VisDroneDataset(
             dataset_dir, "train", stride=cfg["train_stride"], target_size=hw,
-            transforms=get_dfine_train_transforms(strong=strong_aug),
+            transforms=get_dfine_train_transforms(strong=strong_aug, downscale_p=cfg.get("downscale_p", 0.0)),
             pre_transforms=RandomZoomCrop(cfg.get("zoom_crop_scale", (0.5, 1.0)), p=cfg.get("zoom_crop_p", 0.5))
             if strong_aug and cfg.get("zoom_crop_p", 0.5) > 0 else None,
             normalize_imagenet=False, mask_ignore=cfg["mask_ignore"],
