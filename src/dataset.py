@@ -53,6 +53,7 @@ class VisDroneDataset(Dataset[Tuple[torch.Tensor, Dict[str, Any]]]):
         target_size: Tuple[int, int] = (640, 640),
         transforms: Optional[A.Compose] = None,
         normalize_imagenet: bool = True,
+        mask_ignore: bool = False,
     ) -> None:
         """Initializes the dataset.
 
@@ -64,6 +65,8 @@ class VisDroneDataset(Dataset[Tuple[torch.Tensor, Dict[str, Any]]]):
             target_size: (H, W) for aspect-preserving letterboxing.
             transforms: Albumentations Compose pipeline with 'pascal_voc' bbox format.
             normalize_imagenet: If True, applies ImageNet mean & std normalization.
+            mask_ignore: If True, fills ignored regions (iscrowd annotations) with gray before
+                letterboxing, keeping the pixels of target boxes (see src/ignore_mask.py).
         """
         super().__init__()
         self.dataset_dir = dataset_dir
@@ -71,6 +74,7 @@ class VisDroneDataset(Dataset[Tuple[torch.Tensor, Dict[str, Any]]]):
         self.target_size = target_size
         self.transforms = transforms
         self.normalize_imagenet = normalize_imagenet
+        self.mask_ignore = mask_ignore
         self.img_dir = dataset_dir / split / "images"
 
         # ImageNet normalization constants
@@ -90,8 +94,12 @@ class VisDroneDataset(Dataset[Tuple[torch.Tensor, Dict[str, Any]]]):
         # Pre-index target annotations by image_id
         selected_img_ids = set(img["id"] for img in self.samples)
         self.annotations_by_img: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        # Ignored regions are stored once per class as iscrowd annotations; keep unique boxes
+        self.ignore_by_img: Dict[int, set] = defaultdict(set)
         for a in self.coco_dict["annotations"]:
             iid = a["image_id"]
+            if iid in selected_img_ids and a.get("iscrowd", 0) == 1:
+                self.ignore_by_img[iid].add(tuple(float(c) for c in a["bbox"]))
             if iid in selected_img_ids and a.get("iscrowd", 0) == 0:
                 cid = int(a["category_id"])
                 # Categories 1..8 are target classes (pedestrians, vehicles, cycles)
@@ -114,6 +122,9 @@ class VisDroneDataset(Dataset[Tuple[torch.Tensor, Dict[str, Any]]]):
             raise FileNotFoundError(f"Failed to load image: {file_path}")
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         orig_h, orig_w = img_rgb.shape[:2]
+
+        if self.mask_ignore and self.ignore_by_img.get(img_id):
+            img_rgb = self._mask_ignored(img_rgb, img_id)
 
         # Aspect-ratio preserving letterboxing
         padded_img, r, (dw, dh) = letterbox(
@@ -184,6 +195,21 @@ class VisDroneDataset(Dataset[Tuple[torch.Tensor, Dict[str, Any]]]):
         }
 
         return tensor_img, target
+
+    def _mask_ignored(self, img_rgb: np.ndarray, img_id: int) -> np.ndarray:
+        """Fills ignored regions with gray, keeping the pixels of target boxes visible."""
+        from src.ignore_mask import mask_ignored_regions  # lazy: pulls in ultralytics
+
+        h, w = img_rgb.shape[:2]
+        ignore = _coco_to_norm_cxcywh(sorted(self.ignore_by_img[img_id]), h, w)
+        targets = _coco_to_norm_cxcywh([a["bbox"] for a in self.annotations_by_img[img_id]], h, w)
+        return mask_ignored_regions(img_rgb, ignore, targets)
+
+
+def _coco_to_norm_cxcywh(boxes: List[Tuple[float, ...]], h: int, w: int) -> np.ndarray:
+    """COCO [x, y, w, h] pixel boxes -> (N, 4) normalised cx cy w h."""
+    b = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+    return np.stack([(b[:, 0] + b[:, 2] / 2) / w, (b[:, 1] + b[:, 3] / 2) / h, b[:, 2] / w, b[:, 3] / h], axis=1)
 
 
 def detection_collate_fn(

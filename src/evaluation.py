@@ -56,7 +56,7 @@ def unletterbox_bboxes(
 
 
 def format_coco_predictions(
-    image_id: int,
+    image_id: Any,
     boxes_letterbox: np.ndarray,
     scores: np.ndarray,
     labels: np.ndarray,
@@ -101,7 +101,7 @@ def format_coco_predictions(
     for bbox, score, label in zip(coco_boxes, valid_scores, valid_labels):
         records.append(
             {
-                "image_id": int(image_id),
+                "image_id": image_id,  # int for COCO frames, str for test frames
                 "category_id": int(label),
                 "bbox": [float(round(c, 2)) for c in bbox],
                 "score": float(round(score, 4)),
