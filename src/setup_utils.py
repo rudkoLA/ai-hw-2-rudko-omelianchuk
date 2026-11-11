@@ -28,6 +28,30 @@ CANDIDATE_DATASET_DIRS = [
 ]
 
 
+def use_native_batchnorm() -> None:
+    """Runs every nn.BatchNorm* layer with PyTorch's own GPU kernel instead of MIOpen (convolutions keep MIOpen).
+
+    On AMD GPUs (ROCm builds of PyTorch) MIOpen's batch norm can fail with
+    `RuntimeError: miopenStatusUnknownError` (seen with D-FINE + AMP on an RX 7800 XT under Windows).
+    F.batch_norm only picks MIOpen while torch.backends.cudnn.enabled is True, so the flag is switched off
+    for the duration of each BN call; the backward pass uses the kernel chosen in the forward pass. Idempotent.
+    """
+    from torch.nn.modules.batchnorm import _BatchNorm
+
+    if getattr(_BatchNorm.forward, "_native_bn", False):
+        return
+    original_forward = _BatchNorm.forward
+
+    def forward(self, input):
+        if input.is_cuda:
+            with torch.backends.cudnn.flags(enabled=False):
+                return original_forward(self, input)
+        return original_forward(self, input)
+
+    forward._native_bn = True
+    _BatchNorm.forward = forward
+
+
 def setup_environment(
     seed: int = 42,
     mount_gdrive: bool = True,
@@ -36,7 +60,11 @@ def setup_environment(
     """
     Initializes deterministic seeds, configures hardware profile,
     and optionally mounts Google Drive if executing within Google Colab.
+    On ROCm (AMD) builds of PyTorch, batch norm is moved off MIOpen (see use_native_batchnorm).
     """
+    if getattr(torch.version, "hip", None) is not None:
+        use_native_batchnorm()
+
     # Deterministic seeding
     random.seed(seed)
     np.random.seed(seed)
