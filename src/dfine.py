@@ -1,8 +1,12 @@
 """D-FINE (Hugging Face transformers) training, evaluation and prediction on the shared VisDrone protocol.
 
-Data comes from VisDroneDataset (letterbox + src.preprocessing augmentations, no ImageNet normalisation,
-matching D-FINE's own preprocessing), predictions are mapped back to original pixels with
-format_coco_predictions and scored with evaluate_coco_metrics.
+Data comes from VisDroneDataset (RandomZoomCrop on the original image, letterbox, get_dfine_train_transforms;
+no ImageNet normalisation, matching D-FINE's own preprocessing), predictions are mapped back to original pixels
+with format_coco_predictions and scored with evaluate_coco_metrics.
+
+`imgsz` is an int (square input) or (H, W); both sides must be multiples of 32. A 16:9 input such as (768, 1344)
+wastes far less of the input on letterbox padding than a square one (D-FINE builds its anchors and positional
+embeddings from the actual feature-map size, so non-square inputs need no model change).
 
 Run directory layout (mirrors the Ultralytics notebooks):
     last.pt            model / EMA / optimizer / scaler / scheduler state, written every epoch
@@ -30,9 +34,18 @@ from transformers import DFineForObjectDetection
 
 from src.dataset import VisDroneDataset, detection_collate_fn
 from src.evaluation import evaluate_coco_metrics, format_coco_predictions
-from src.preprocessing import get_train_transforms, letterbox
+from src.preprocessing import RandomZoomCrop, get_dfine_train_transforms, letterbox
 
 LOSS_TYPES = ("vfl", "bbox", "giou", "fgl", "ddf")
+ImgSize = Union[int, Tuple[int, int], List[int]]
+
+
+def _hw(imgsz: ImgSize) -> Tuple[int, int]:
+    """int or (H, W) -> (H, W), checked to be multiples of 32 (the backbone's largest stride)."""
+    h, w = (imgsz, imgsz) if isinstance(imgsz, int) else (int(imgsz[0]), int(imgsz[1]))
+    if h % 32 or w % 32:
+        raise ValueError(f"imgsz sides must be multiples of 32, got {(h, w)}")
+    return h, w
 
 
 # --------------------------------------------------------------------------- model
@@ -82,8 +95,8 @@ class FramesDataset(Dataset):
     """Letterboxed images for prediction only. `frames` are dicts with "id" and "file_name"
     (relative to `image_root`): COCO image records or src.submission.load_test_frames()."""
 
-    def __init__(self, frames: List[Dict[str, Any]], image_root: Union[str, Path], imgsz: int) -> None:
-        self.frames, self.image_root, self.imgsz = frames, Path(image_root), imgsz
+    def __init__(self, frames: List[Dict[str, Any]], image_root: Union[str, Path], imgsz: ImgSize) -> None:
+        self.frames, self.image_root, self.hw = frames, Path(image_root), _hw(imgsz)
 
     def __len__(self) -> int:
         return len(self.frames)
@@ -91,7 +104,7 @@ class FramesDataset(Dataset):
     def __getitem__(self, i: int) -> Tuple[torch.Tensor, Dict[str, Any]]:
         frame = self.frames[i]
         img = cv2.cvtColor(cv2.imread(str(self.image_root / frame["file_name"])), cv2.COLOR_BGR2RGB)
-        padded, r, (dw, dh) = letterbox(img, target_shape=(self.imgsz, self.imgsz))
+        padded, r, (dw, dh) = letterbox(img, target_shape=self.hw)
         tensor = torch.from_numpy(padded.astype(np.float32).transpose(2, 0, 1) / 255.0)
         meta = {"image_id": frame["id"], "scale_ratio": r, "pad": (dw, dh), "orig_size": img.shape[:2]}
         return tensor, meta
@@ -109,12 +122,14 @@ def _meta(target: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _to_labels(targets, imgsz: int, device: Any) -> List[Dict[str, torch.Tensor]]:
+def _to_labels(targets, hw: Tuple[int, int], device: Any) -> List[Dict[str, torch.Tensor]]:
     """VisDroneDataset targets (letterbox xyxy pixels, COCO ids 1..8) -> D-FINE labels
     (normalised cx cy w h, class ids 0..7)."""
+    h, w = hw
+    scale = torch.tensor([w, h, w, h], dtype=torch.float32)
     labels = []
     for t in targets:
-        b = t["boxes"] / imgsz
+        b = t["boxes"] / scale
         cxcywh = torch.stack([(b[:, 0] + b[:, 2]) / 2, (b[:, 1] + b[:, 3]) / 2, b[:, 2] - b[:, 0], b[:, 3] - b[:, 1]], 1)
         labels.append({"class_labels": (t["labels"] - 1).to(device), "boxes": cxcywh.to(device)})
     return labels
@@ -136,15 +151,17 @@ def _loader(dataset: Dataset, batch: int, workers: int, shuffle: bool, seed: int
 # --------------------------------------------------------------------------- prediction
 
 
-def _postprocess(logits, pred_boxes, metas, imgsz: int, max_det: int, score_thresh: float) -> List[Dict[str, Any]]:
+def _postprocess(logits, pred_boxes, metas, hw: Tuple[int, int], max_det: int, score_thresh: float) -> List[Dict[str, Any]]:
     """Top-k (query, class) pairs per image -> COCO records in original pixel coordinates."""
+    h, w = hw
     prob = logits.sigmoid().float()
     n_cls = prob.shape[-1]
     scores, idx = prob.flatten(1).topk(min(max_det, prob.shape[1] * n_cls), dim=1)
     labels, queries = idx % n_cls, idx // n_cls
     boxes = pred_boxes.float().gather(1, queries.unsqueeze(-1).expand(-1, -1, 4))
-    cx, cy, w, h = boxes.unbind(-1)
-    xyxy = torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], -1) * imgsz
+    cx, cy, bw, bh = boxes.unbind(-1)
+    xyxy = torch.stack([cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2], -1)
+    xyxy = xyxy * torch.tensor([w, h, w, h], dtype=xyxy.dtype, device=xyxy.device)
 
     records = []
     for b, meta in enumerate(metas):
@@ -165,7 +182,7 @@ def _postprocess(logits, pred_boxes, metas, imgsz: int, max_det: int, score_thre
 def predict(
     model: DFineForObjectDetection,
     loader: DataLoader,
-    imgsz: int,
+    imgsz: ImgSize,
     max_det: int,
     device: Any,
     amp: bool = True,
@@ -176,13 +193,14 @@ def predict(
 
     Returns (COCO records, mean forward time in ms per frame, mean val losses if with_loss)."""
     model.eval()
+    hw = _hw(imgsz)
     dev = torch.device(device)
     use_amp = amp and dev.type == "cuda"
     records, total_s, n_frames = [], 0.0, 0
     loss_sums: Dict[str, float] = defaultdict(float)
     for images, targets in tqdm(loader, desc="predict", leave=False):
         pixel_values = torch.stack(images).to(dev, non_blocking=True)
-        labels = _to_labels(targets, imgsz, dev) if with_loss else None
+        labels = _to_labels(targets, hw, dev) if with_loss else None
         if dev.type == "cuda":
             torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -195,7 +213,7 @@ def predict(
         if with_loss:
             for k, v in _loss_summary(out.loss, out.loss_dict).items():
                 loss_sums[k] += v * len(images)
-        records += _postprocess(out.logits, out.pred_boxes, [_meta(t) for t in targets], imgsz, max_det, score_thresh)
+        records += _postprocess(out.logits, out.pred_boxes, [_meta(t) for t in targets], hw, max_det, score_thresh)
     losses = {k: v / max(1, n_frames) for k, v in loss_sums.items()}
     return records, 1000.0 * total_s / max(1, n_frames), losses
 
@@ -204,7 +222,7 @@ def predict_frames(
     model: DFineForObjectDetection,
     frames: List[Dict[str, Any]],
     image_root: Union[str, Path],
-    imgsz: int,
+    imgsz: ImgSize,
     batch: int,
     max_det: int,
     device: Any,
@@ -221,7 +239,7 @@ def evaluate_dfine(
     model: DFineForObjectDetection,
     dataset_dir: Union[str, Path],
     val_stride: int,
-    imgsz: int,
+    imgsz: ImgSize,
     batch: int,
     max_det: int,
     device: Any,
@@ -232,7 +250,7 @@ def evaluate_dfine(
     """COCO metrics (up to 500 detections per image), speed and size on the validation frames.
     Saved to run_dir/metrics.json when run_dir is given."""
     dataset_dir = Path(dataset_dir)
-    val_ds = VisDroneDataset(dataset_dir, "val", stride=val_stride, target_size=(imgsz, imgsz), normalize_imagenet=False)
+    val_ds = VisDroneDataset(dataset_dir, "val", stride=val_stride, target_size=_hw(imgsz), normalize_imagenet=False)
     records, ms, _ = predict(model, _loader(val_ds, batch, workers, shuffle=False), imgsz, max_det, device, amp)
     coco_gt = COCO(str(dataset_dir / "val" / "annotations_coco.json"))
     metrics = evaluate_coco_metrics(coco_gt, records, image_ids=[s["id"] for s in val_ds.samples], max_dets=500)
@@ -303,28 +321,43 @@ def train_dfine(cfg: Dict[str, Any], dataset_dir: Union[str, Path], run_dir: Uni
     if state == "new":
         (run_dir / "cfg.json").write_text(json.dumps(cfg, indent=2))
     torch.manual_seed(cfg["seed"])
-    imgsz = cfg["imgsz"]
+    hw = _hw(cfg["imgsz"])
+    accumulate = max(1, int(cfg.get("accumulate", 1)))
+    no_aug_epochs = int(cfg.get("no_aug_epochs", 0))
 
-    # Data
-    train_ds = VisDroneDataset(
-        dataset_dir, "train", stride=cfg["train_stride"], target_size=(imgsz, imgsz),
-        transforms=get_train_transforms(), normalize_imagenet=False, mask_ignore=cfg["mask_ignore"],
-    )
-    if cfg.get("fraction", 1.0) < 1.0:
-        keep = torch.randperm(len(train_ds), generator=torch.Generator().manual_seed(cfg["seed"]))
-        train_ds = Subset(train_ds, sorted(keep[: int(len(train_ds) * cfg["fraction"])].tolist()))
-    val_ds = VisDroneDataset(dataset_dir, "val", stride=cfg["val_stride"], target_size=(imgsz, imgsz), normalize_imagenet=False)
-    train_loader = _loader(train_ds, cfg["batch"], cfg["workers"], shuffle=True, seed=cfg["seed"])
+    # Data. The last `no_aug_epochs` epochs train on (almost) clean images: flip only, no zoom crop.
+    def make_train_loader(strong_aug: bool) -> DataLoader:
+        ds = VisDroneDataset(
+            dataset_dir, "train", stride=cfg["train_stride"], target_size=hw,
+            transforms=get_dfine_train_transforms(strong=strong_aug),
+            pre_transforms=RandomZoomCrop(cfg.get("zoom_crop_scale", (0.5, 1.0)), p=cfg.get("zoom_crop_p", 0.5))
+            if strong_aug and cfg.get("zoom_crop_p", 0.5) > 0 else None,
+            normalize_imagenet=False, mask_ignore=cfg["mask_ignore"],
+        )
+        if cfg.get("fraction", 1.0) < 1.0:
+            keep = torch.randperm(len(ds), generator=torch.Generator().manual_seed(cfg["seed"]))
+            ds = Subset(ds, sorted(keep[: int(len(ds) * cfg["fraction"])].tolist()))
+        return _loader(ds, cfg["batch"], cfg["workers"], shuffle=True, seed=cfg["seed"])
+
+    def strong_aug_at(epoch: int) -> bool:
+        return epoch < cfg["epochs"] - no_aug_epochs
+
+    val_ds = VisDroneDataset(dataset_dir, "val", stride=cfg["val_stride"], target_size=hw, normalize_imagenet=False)
     val_loader = _loader(val_ds, cfg["batch"], cfg["workers"], shuffle=False)
     coco_gt = COCO(str(dataset_dir / "val" / "annotations_coco.json"))
     val_ids = [s["id"] for s in val_ds.samples]
-    print(f"Train frames: {len(train_ds):,} | Val frames: {len(val_ds):,}")
+    loader_aug = True  # strong_aug setting of the current train_loader; rebuilt when it changes
+    train_loader = make_train_loader(loader_aug)
+    print(f"Train frames: {len(train_loader.dataset):,} | Val frames: {len(val_ds):,} | "
+          f"input {hw[0]}x{hw[1]} (HxW) | batch {cfg['batch']} x accumulate {accumulate}")
 
     # Model, EMA, optimizer, schedule
     model = build_dfine(cfg["checkpoint"], cfg["class_names"], **cfg["model_config"]).to(dev)
     ema = ModelEMA(model, cfg["ema_decay"], cfg["ema_warmups"]) if cfg["ema_decay"] > 0 else None
     optimizer = torch.optim.AdamW(_param_groups(model, cfg["lr0"], cfg["backbone_lr_mult"], cfg["weight_decay"]), lr=cfg["lr0"])
-    total_iters = cfg["epochs"] * len(train_loader)
+    # The scheduler, warm-up and EMA count optimizer steps (one per `accumulate` batches)
+    steps_per_epoch = math.ceil(len(train_loader) / accumulate)
+    total_iters = cfg["epochs"] * steps_per_epoch
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, _lr_lambda(cfg["warmup_iters"], total_iters, cfg["lr_min_ratio"])
     )
@@ -350,32 +383,48 @@ def train_dfine(cfg: Dict[str, Any], dataset_dir: Union[str, Path], run_dir: Uni
 
     t_start = time.time() - (history[-1]["time"] if history else 0.0)
     for epoch in range(start_epoch, cfg["epochs"]):
+        if strong_aug_at(epoch) != loader_aug:
+            loader_aug = strong_aug_at(epoch)
+            if not loader_aug:
+                print(f"epoch {epoch + 1}: augmentation off (flip only) for the last {no_aug_epochs} epoch(s)")
+            del train_loader  # shuts down its persistent workers
+            train_loader = make_train_loader(loader_aug)
+
         # Train one epoch
         model.train()
+        if dev.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(dev)
         sums: Dict[str, float] = defaultdict(float)
+        n_batches = len(train_loader)
+        optimizer.zero_grad(set_to_none=True)
         pbar = tqdm(train_loader, desc=f"epoch {epoch + 1}/{cfg['epochs']}")
         for i, (images, targets) in enumerate(pbar):
             pixel_values = torch.stack(images).to(dev, non_blocking=True)
-            labels = _to_labels(targets, imgsz, dev)
+            labels = _to_labels(targets, hw, dev)
             with torch.autocast(dev.type, dtype=torch.float16, enabled=use_amp):
                 out = model(pixel_values=pixel_values, labels=labels)
-            optimizer.zero_grad(set_to_none=True)
-            scaler.scale(out.loss).backward()
-            if cfg["clip_grad_norm"] > 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["clip_grad_norm"])
-            scaler.step(optimizer)
-            scaler.update()
-            scheduler.step()
-            if ema is not None:
-                ema.update(model)
+            scaler.scale(out.loss / accumulate).backward()
+            if (i + 1) % accumulate == 0 or i + 1 == n_batches:
+                if cfg["clip_grad_norm"] > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["clip_grad_norm"])
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+                scheduler.step()
+                if ema is not None:
+                    ema.update(model)
             for k, v in _loss_summary(out.loss, out.loss_dict).items():
                 sums[k] += v
-            pbar.set_postfix(loss=f"{sums['loss'] / (i + 1):.3f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
+            postfix = {"loss": f"{sums['loss'] / (i + 1):.3f}", "lr": f"{optimizer.param_groups[0]['lr']:.2e}"}
+            if dev.type == "cuda":  # peak reserved memory: watch this to tune `batch`
+                postfix["mem"] = f"{torch.cuda.max_memory_reserved(dev) / 2**30:.1f}G"
+            pbar.set_postfix(postfix)
+        peak_mem_gb = torch.cuda.max_memory_reserved(dev) / 2**30 if dev.type == "cuda" else 0.0
 
         # Validate (EMA weights when enabled)
         eval_model = ema.module if ema is not None else model
-        records, _, val_losses = predict(eval_model, val_loader, imgsz, cfg["max_det"], dev, cfg["amp"], with_loss=True)
+        records, _, val_losses = predict(eval_model, val_loader, hw, cfg["max_det"], dev, cfg["amp"], with_loss=True)
         m = evaluate_coco_metrics(coco_gt, records, image_ids=val_ids, max_dets=500)
         row = {
             "epoch": epoch + 1,
@@ -387,6 +436,7 @@ def train_dfine(cfg: Dict[str, Any], dataset_dir: Union[str, Path], run_dir: Uni
             "metrics/mAR": m["mAR"],
             **{f"val/{k}": v for k, v in val_losses.items()},
             "lr": optimizer.param_groups[0]["lr"],
+            "gpu_mem_GB": round(peak_mem_gb, 2),
         }
         history.append(row)
         pd.DataFrame(history).to_csv(run_dir / "results.csv", index=False)

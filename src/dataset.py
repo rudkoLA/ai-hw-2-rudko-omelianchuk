@@ -54,6 +54,7 @@ class VisDroneDataset(Dataset[Tuple[torch.Tensor, Dict[str, Any]]]):
         transforms: Optional[A.Compose] = None,
         normalize_imagenet: bool = True,
         mask_ignore: bool = False,
+        pre_transforms: Optional[Callable[..., Any]] = None,
     ) -> None:
         """Initializes the dataset.
 
@@ -67,6 +68,10 @@ class VisDroneDataset(Dataset[Tuple[torch.Tensor, Dict[str, Any]]]):
             normalize_imagenet: If True, applies ImageNet mean & std normalization.
             mask_ignore: If True, fills ignored regions (iscrowd annotations) with gray before
                 letterboxing, keeping the pixels of target boxes (see src/ignore_mask.py).
+            pre_transforms: Optional callable `(img_rgb, boxes_xyxy, labels) -> (img_rgb, boxes_xyxy, labels)`
+                applied to the original image (after ignore masking, before letterboxing), e.g.
+                src.preprocessing.RandomZoomCrop. Training only: `scale_ratio` / `pad` then refer to the
+                transformed image, while `orig_size` stays the original one.
         """
         super().__init__()
         self.dataset_dir = dataset_dir
@@ -75,6 +80,7 @@ class VisDroneDataset(Dataset[Tuple[torch.Tensor, Dict[str, Any]]]):
         self.transforms = transforms
         self.normalize_imagenet = normalize_imagenet
         self.mask_ignore = mask_ignore
+        self.pre_transforms = pre_transforms
         self.img_dir = dataset_dir / split / "images"
 
         # ImageNet normalization constants
@@ -126,22 +132,30 @@ class VisDroneDataset(Dataset[Tuple[torch.Tensor, Dict[str, Any]]]):
         if self.mask_ignore and self.ignore_by_img.get(img_id):
             img_rgb = self._mask_ignored(img_rgb, img_id)
 
+        # Ground-truth boxes in original pixels [x1, y1, x2, y2]
+        raw_anns = self.annotations_by_img[img_id]
+        boxes_orig = np.array(
+            [[a["bbox"][0], a["bbox"][1], a["bbox"][0] + a["bbox"][2], a["bbox"][1] + a["bbox"][3]] for a in raw_anns],
+            dtype=np.float32,
+        ).reshape(-1, 4)
+        labels_orig = [int(a["category_id"]) for a in raw_anns]
+        if self.pre_transforms is not None:
+            img_rgb, boxes_orig, labels_orig = self.pre_transforms(img_rgb, boxes_orig, labels_orig)
+
         # Aspect-ratio preserving letterboxing
         padded_img, r, (dw, dh) = letterbox(
             img_rgb, target_shape=self.target_size, color=(114, 114, 114)
         )
 
         # Map ground-truth boxes to letterbox space [x1, y1, x2, y2]
-        raw_anns = self.annotations_by_img[img_id]
         boxes_lb: List[List[float]] = []
         labels: List[int] = []
 
-        for ann in raw_anns:
-            bx, by, bw, bh = [float(c) for c in ann["bbox"]]
-            x1 = bx * r + dw
-            y1 = by * r + dh
-            x2 = (bx + bw) * r + dw
-            y2 = (by + bh) * r + dh
+        for (bx1, by1, bx2, by2), cid in zip(boxes_orig.tolist(), labels_orig):
+            x1 = bx1 * r + dw
+            y1 = by1 * r + dh
+            x2 = bx2 * r + dw
+            y2 = by2 * r + dh
 
             # Clip to letterbox bounds
             x1 = max(0.0, min(float(self.target_size[1]), x1))
@@ -152,7 +166,7 @@ class VisDroneDataset(Dataset[Tuple[torch.Tensor, Dict[str, Any]]]):
             # Filter degenerate zero-area boxes
             if (x2 - x1) >= 1.0 and (y2 - y1) >= 1.0:
                 boxes_lb.append([x1, y1, x2, y2])
-                labels.append(int(ann["category_id"]))
+                labels.append(cid)
 
         # Apply Albumentations augmentations if provided
         if self.transforms is not None and len(boxes_lb) > 0:
