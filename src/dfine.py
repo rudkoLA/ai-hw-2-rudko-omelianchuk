@@ -69,6 +69,21 @@ def load_dfine(path: Union[str, Path], device: Any) -> DFineForObjectDetection:
     return DFineForObjectDetection.from_pretrained(str(path)).to(device).eval()
 
 
+def load_dfine_last(run_dir: Union[str, Path], device: Any, ema: bool = True) -> DFineForObjectDetection:
+    """Loads the weights of the LAST finished epoch from run_dir / "last.pt" in eval mode.
+
+    `ema=True` takes the EMA weights (the ones validated every epoch and saved to best/), `ema=False` the raw
+    training weights. The architecture comes from run_dir / "best" (same config, weights replaced).
+    """
+    run_dir = Path(run_dir)
+    ckpt = torch.load(run_dir / "last.pt", map_location="cpu", weights_only=False)
+    state = ckpt["ema"] if ema and ckpt.get("ema") is not None else ckpt["model"]
+    model = DFineForObjectDetection.from_pretrained(str(run_dir / "best"))
+    model.load_state_dict(state)
+    print(f"Loaded {'EMA' if state is ckpt.get('ema') else 'raw'} weights of epoch {ckpt['epoch']} from last.pt")
+    return model.to(device).eval()
+
+
 class ModelEMA:
     """Exponential moving average of model weights with warm-up (as in the official D-FINE training)."""
 
@@ -246,9 +261,10 @@ def evaluate_dfine(
     run_dir: Optional[Union[str, Path]] = None,
     workers: int = 4,
     amp: bool = True,
+    metrics_name: str = "metrics.json",
 ) -> Dict[str, float]:
     """COCO metrics (up to 500 detections per image), speed and size on the validation frames.
-    Saved to run_dir/metrics.json when run_dir is given."""
+    Saved to run_dir / metrics_name when run_dir is given."""
     dataset_dir = Path(dataset_dir)
     val_ds = VisDroneDataset(dataset_dir, "val", stride=val_stride, target_size=_hw(imgsz), normalize_imagenet=False)
     records, ms, _ = predict(model, _loader(val_ds, batch, workers, shuffle=False), imgsz, max_det, device, amp)
@@ -260,7 +276,7 @@ def evaluate_dfine(
         "params_M": sum(p.numel() for p in model.parameters()) / 1e6,
     })
     if run_dir is not None:
-        (Path(run_dir) / "metrics.json").write_text(json.dumps(metrics, indent=2))
+        (Path(run_dir) / metrics_name).write_text(json.dumps(metrics, indent=2))
     return metrics
 
 

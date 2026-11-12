@@ -123,6 +123,8 @@ def submit_to_kaggle(submission_path: Union[str, Path], message: str) -> None:
          "-c", COMPETITION_NAME, "-f", str(submission_path), "-m", message],
         capture_output=True,
         text=True,
+        encoding="utf-8",  # Windows would otherwise decode with cp1252 and crash on the CLI's progress bar
+        errors="replace",
     )
     output = "\n".join(s.strip() for s in (result.stdout, result.stderr) if s.strip())
     if result.returncode != 0:
