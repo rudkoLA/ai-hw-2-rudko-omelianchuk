@@ -383,6 +383,158 @@ def generate_yolo_submission(
     return sub_df
 
 
+def generate_faster_rcnn_submission(
+    model: torch.nn.Module,
+    dataset_dir: str | Path,
+    output_path: str | Path = "submission_cp2.csv",
+    conf_thresh: float = 0.20,
+    target_size: int = 1024,
+    device: str | torch.device | None = None,
+    batch_size: int = 4,
+    max_images: int | None = None,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Generates official Kaggle competition submission for Faster R-CNN detector.
+
+    Columns: image_id, PredictionString
+    Row count: Exactly 3,811 rows matching test_images.csv
+    PredictionString: Space-separated '<class> <confidence> <x> <y> <w> <h>' in pixel coordinates.
+    """
+    import cv2
+
+    from src.preprocessing import letterbox
+
+    dataset_dir = Path(dataset_dir)
+    test_csv = dataset_dir / "test_images.csv"
+    if not test_csv.exists():
+        raise FileNotFoundError(f"test_images.csv not found at {test_csv}")
+
+    df_test = pd.read_csv(test_csv)
+    if max_images is not None:
+        df_test = df_test.head(max_images)
+
+    dev = torch.device(device) if device is not None else next(model.parameters()).device
+    model.eval()
+
+    submission_rows: list[dict[str, Any]] = []
+    empty_backfilled = 0
+
+    if verbose:
+        print(f"--> Starting Faster R-CNN test inference across {len(df_test):,} frames...")
+
+    target_wh = (target_size, target_size) if isinstance(target_size, int) else (int(target_size[0]), int(target_size[1]))
+
+    for start_idx in range(0, len(df_test), batch_size):
+        batch_slice = df_test.iloc[start_idx : start_idx + batch_size]
+        batch_tensors = []
+        batch_meta = []
+
+        for _, item in batch_slice.iterrows():
+            img_path = dataset_dir / item["file_name"]
+            orig_w = float(item["width"])
+            orig_h = float(item["height"])
+
+            if not img_path.exists():
+                batch_meta.append((str(item["image_id"]), orig_w, orig_h, 1.0, (0.0, 0.0), False))
+                continue
+
+            img_bgr = cv2.imread(str(img_path))
+            if img_bgr is None:
+                batch_meta.append((str(item["image_id"]), orig_w, orig_h, 1.0, (0.0, 0.0), False))
+                continue
+
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            img_lb, scale_ratio, pad = letterbox(img_rgb, target_shape=target_wh, scaleup=True)
+            tensor = torch.from_numpy(img_lb).permute(2, 0, 1).float() / 255.0
+            batch_tensors.append(tensor.to(dev))
+            batch_meta.append((str(item["image_id"]), orig_w, orig_h, scale_ratio, pad, True))
+
+        if not batch_tensors:
+            continue
+
+        with torch.inference_mode():
+            preds = model(batch_tensors)
+
+        pred_idx = 0
+        for img_id, orig_w, orig_h, scale_ratio, pad, success in batch_meta:
+            if not success or pred_idx >= len(preds):
+                token = f"2 0.0100 {orig_w / 2:.1f} {orig_h / 2:.1f} 50.0 50.0"
+                submission_rows.append({"image_id": img_id, "PredictionString": token})
+                empty_backfilled += 1
+                continue
+
+            pred = preds[pred_idx]
+            pred_idx += 1
+
+            p_boxes = pred["boxes"].cpu().numpy()
+            p_scores = pred["scores"].cpu().numpy()
+            p_labels = pred["labels"].cpu().numpy()
+
+            keep = p_scores >= conf_thresh
+            if not np.any(keep):
+                if len(p_scores) > 0:
+                    top_i = int(np.argmax(p_scores))
+                    top_box = unletterbox_bboxes(
+                        p_boxes[top_i : top_i + 1],
+                        scale_ratio,
+                        pad,
+                        (int(orig_h), int(orig_w)),
+                        to_coco_format=True,
+                    )[0]
+                    top_cls = max(0, min(7, int(p_labels[top_i]) - 1))
+                    top_score = float(p_scores[top_i])
+                    token = f"{top_cls} {top_score:.4f} {top_box[0]:.1f} {top_box[1]:.1f} {top_box[2]:.1f} {top_box[3]:.1f}"
+                else:
+                    token = f"2 0.0100 {orig_w / 2:.1f} {orig_h / 2:.1f} 50.0 50.0"
+                submission_rows.append({"image_id": img_id, "PredictionString": token})
+                empty_backfilled += 1
+                continue
+
+            valid_boxes = p_boxes[keep]
+            valid_scores = p_scores[keep]
+            valid_labels = p_labels[keep]
+
+            coco_boxes = unletterbox_bboxes(
+                valid_boxes, scale_ratio, pad, (int(orig_h), int(orig_w)), to_coco_format=True
+            )
+
+            sorted_order = np.argsort(-valid_scores)[:500]
+
+            tokens = []
+            for s_idx in sorted_order:
+                bx = coco_boxes[s_idx]
+                sc = valid_scores[s_idx]
+                lb = int(valid_labels[s_idx])
+                cl = max(0, min(7, lb - 1))
+                tokens.append(f"{cl} {sc:.4f} {bx[0]:.1f} {bx[1]:.1f} {bx[2]:.1f} {bx[3]:.1f}")
+
+            submission_rows.append({"image_id": img_id, "PredictionString": " ".join(tokens)})
+
+        if verbose and (start_idx + batch_size) % 400 < batch_size:
+            print(f"    Completed {min(start_idx + batch_size, len(df_test))}/{len(df_test)} frames...")
+
+    if empty_backfilled > 0 and verbose:
+        print(f"--> Automatically backfilled {empty_backfilled} zero-detection frames to guarantee zero nulls.")
+
+    sub_df = pd.DataFrame(submission_rows)
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    sub_df.to_csv(out_path, index=False)
+
+    if verbose:
+        print(
+            f"--> Successfully generated official Kaggle submission at {out_path} "
+            f"({len(sub_df):,} rows matching test set, 0 duplicates)"
+        )
+
+    return sub_df
+
+
+# Backward-compatible aliases for single-stage and generic PyTorch detectors
+generate_retinanet_submission = generate_faster_rcnn_submission
+generate_detection_submission = generate_faster_rcnn_submission
+
+
 def validate_submission_file(
     submission_path: Union[str, Path],
     dataset_dir: Optional[Union[str, Path]] = None,

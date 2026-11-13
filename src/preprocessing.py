@@ -13,7 +13,7 @@ from sklearn.model_selection import GroupKFold
 
 def letterbox(
     img: np.ndarray,
-    target_shape: Tuple[int, int] = (640, 640),
+    target_shape: int | Tuple[int, int] = (640, 640),
     color: Tuple[int, int, int] = (114, 114, 114),
     scaleup: bool = True,
 ) -> Tuple[np.ndarray, float, Tuple[float, float]]:
@@ -24,6 +24,8 @@ def letterbox(
         ratio: Scale ratio applied
         (dw, dh): Padding added to width and height (split equally on both sides)
     """
+    if isinstance(target_shape, int):
+        target_shape = (target_shape, target_shape)
     shape = img.shape[:2]  # [height, width]
     r = min(target_shape[0] / shape[0], target_shape[1] / shape[1])
     if not scaleup:
@@ -51,7 +53,11 @@ letterbox_image = letterbox
 BBoxFormat = Literal["coco", "pascal_voc", "albumentations", "yolo"]
 
 
-def get_train_transforms(bbox_format: BBoxFormat = "pascal_voc") -> A.Compose:
+def get_train_transforms(
+    bbox_format: BBoxFormat = "pascal_voc",
+    target_size: Any = None,
+    **kwargs: Any,
+) -> A.Compose:
     """Builds reproducible Albumentations augmentation pipeline for training.
     
     Args:
@@ -147,7 +153,11 @@ def get_dfine_train_transforms(strong: bool = True, downscale_p: float = 0.0) ->
     )
 
 
-def get_val_transforms(bbox_format: BBoxFormat = "pascal_voc") -> A.Compose:
+def get_val_transforms(
+    bbox_format: BBoxFormat = "pascal_voc",
+    target_size: Any = None,
+    **kwargs: Any,
+) -> A.Compose:
     """Validation transformation without stochastic augmentation."""
     return A.Compose(
         [A.NoOp()],

@@ -52,6 +52,73 @@ def use_native_batchnorm() -> None:
     _BatchNorm.forward = forward
 
 
+def setup_kaggle_credentials(
+    kaggle_json_path: Union[str, Path] = "kaggle.json",
+    backup_json_str: Optional[str] = None,
+) -> bool:
+    """Configures Kaggle API authentication.
+    
+    Tries in order:
+    1. backup_json_str if provided (ideal for pasting credentials directly into Colab).
+    2. Local kaggle_json_path file (e.g. ./kaggle.json).
+    3. Existing ~/.kaggle/kaggle.json.
+    
+    Sets KAGGLE_USERNAME and KAGGLE_KEY environment variables and creates ~/.kaggle/kaggle.json.
+    
+    Returns:
+        True if credentials were successfully configured, False otherwise.
+    """
+    creds: Optional[Dict[str, str]] = None
+    source_desc = ""
+
+    # 1. Try backup string first if non-empty and not a placeholder
+    if backup_json_str and backup_json_str.strip():
+        try:
+            parsed = json.loads(backup_json_str.strip())
+            u = parsed.get("username", "")
+            k = parsed.get("key", "")
+            if u and k and "USERNAME_HERE" not in u and "LEGACY_API_KEY_HERE" not in k and "YOUR_" not in u:
+                creds = parsed
+                source_desc = "backup string in notebook"
+        except json.JSONDecodeError as e:
+            print(f"[Kaggle]: Warning: Failed to parse backup_json_str as JSON: {e}")
+
+    # 2. Try local file if not yet loaded
+    if creds is None:
+        p = Path(kaggle_json_path)
+        if p.exists():
+            try:
+                with open(p, "r") as f:
+                    creds = json.load(f)
+                source_desc = f"local file ({p})"
+            except Exception as e:
+                print(f"[Kaggle]: Warning: Failed to read {p}: {e}")
+
+    # 3. Try existing ~/.kaggle/kaggle.json
+    dest_path = Path.home() / ".kaggle" / "kaggle.json"
+    if creds is None and dest_path.exists():
+        try:
+            with open(dest_path, "r") as f:
+                creds = json.load(f)
+            source_desc = f"existing {dest_path}"
+        except Exception as e:
+            print(f"[Kaggle]: Warning: Failed to read {dest_path}: {e}")
+
+    if creds and "username" in creds and "key" in creds:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest_path, "w") as f:
+            json.dump(creds, f)
+        dest_path.chmod(0o600)
+
+        os.environ["KAGGLE_USERNAME"] = creds["username"]
+        os.environ["KAGGLE_KEY"] = creds["key"]
+        print(f"[Kaggle]: Credentials successfully configured from {source_desc} (User: {creds['username']})")
+        return True
+
+    print("[Kaggle]: No valid Kaggle credentials found. Please provide 'kaggle.json' or set backup_json_str.")
+    return False
+
+
 def setup_environment(
     seed: int = 42,
     mount_gdrive: bool = True,
@@ -116,19 +183,26 @@ def setup_environment(
             "num_workers": 4 if is_cuda else 0
         }
 
+    in_colab = Path("/content").exists()
+    checkpoint_dir = gdrive_dir if gdrive_dir is not None else Path("checkpoints")
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
     return {
         "device": device,
         "is_cuda": is_cuda,
         "is_mps": is_mps,
         "hw_cfg": hw_cfg,
-        "gdrive_dir": gdrive_dir,
-        "seed": seed
+        "in_colab": in_colab,
+        "checkpoint_dir": checkpoint_dir,
+        "gdrive_dir": checkpoint_dir,
+        "seed": seed,
     }
 
 
 def ensure_dataset(
     custom_dir: Optional[Union[str, Path]] = None,
-    auto_download: bool = True
+    auto_download: bool = True,
+    backup_kaggle_json: Optional[str] = None,
 ) -> Tuple[Path, Dict[str, Any], Dict[str, Any], List[str]]:
     """
     Locates or automatically downloads the competition dataset.
@@ -157,45 +231,44 @@ def ensure_dataset(
     if resolved_dir is None and auto_download:
         print(f"--> Dataset not found locally. Preparing download for '{COMPETITION_NAME}'...")
 
-        # Setup Kaggle credentials if local file exists
-        kaggle_json = Path("kaggle.json")
-        dest_kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
-        if kaggle_json.exists() and not dest_kaggle_json.exists():
-            dest_kaggle_json.parent.mkdir(parents=True, exist_ok=True)
-            with open(kaggle_json) as f_in, open(dest_kaggle_json, "w") as f_out:
-                f_out.write(f_in.read())
-            dest_kaggle_json.chmod(0o600)
-            print("--> Configured ~/.kaggle/kaggle.json credentials.")
+        setup_kaggle_credentials(backup_json_str=backup_kaggle_json)
 
-        # Attempt download via official Kaggle CLI
         zip_name = f"{COMPETITION_NAME}.zip"
         target_dir = Path("/content/dataset") if Path("/content").exists() else Path("dataset")
 
-        try:
-            print("--> Downloading competition archive via Kaggle CLI...")
-            subprocess.run(
-                [sys.executable, "-m", "kaggle", "competitions", "download", "-c", COMPETITION_NAME],
-                check=True
-            )
-            print(f"--> Extracting archive into {target_dir}...")
+        if Path(zip_name).exists():
+            print(f"--> Found existing {zip_name}. Extracting into {target_dir}...")
             target_dir.mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(zip_name, "r") as zf:
                 zf.extractall(target_dir)
             resolved_dir = target_dir
             print(f"--> Dataset extracted successfully to: {resolved_dir}")
-        except Exception as e_cli:
-            print(f"--> Kaggle CLI returned: {e_cli}. Attempting kagglehub fallback...")
+        else:
             try:
-                import kagglehub
-                dataset_path_str = kagglehub.competition_download(COMPETITION_NAME)
-                resolved_dir = Path(dataset_path_str)
-                print(f"--> kagglehub download successful: {resolved_dir}")
-            except Exception as e_hub:
-                raise RuntimeError(
-                    f"Failed to automatically retrieve dataset. Please ensure Kaggle API "
-                    f"credentials are set (~/.kaggle/kaggle.json) or run 'kaggle competitions download -c {COMPETITION_NAME}' manually.\n"
-                    f"Errors: CLI ({e_cli}), Hub ({e_hub})"
+                print("--> Downloading competition archive via Kaggle CLI...")
+                subprocess.run(
+                    [sys.executable, "-m", "kaggle", "competitions", "download", "-c", COMPETITION_NAME],
+                    check=True
                 )
+                print(f"--> Extracting archive into {target_dir}...")
+                target_dir.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(zip_name, "r") as zf:
+                    zf.extractall(target_dir)
+                resolved_dir = target_dir
+                print(f"--> Dataset extracted successfully to: {resolved_dir}")
+            except Exception as e_cli:
+                print(f"--> Kaggle CLI returned: {e_cli}. Attempting kagglehub fallback...")
+                try:
+                    import kagglehub
+                    dataset_path_str = kagglehub.competition_download(COMPETITION_NAME)
+                    resolved_dir = Path(dataset_path_str)
+                    print(f"--> kagglehub download successful: {resolved_dir}")
+                except Exception as e_hub:
+                    raise RuntimeError(
+                        f"Failed to automatically retrieve dataset. Please ensure Kaggle API "
+                        f"credentials are set (~/.kaggle/kaggle.json) or run 'kaggle competitions download -c {COMPETITION_NAME}' manually.\n"
+                        f"Errors: CLI ({e_cli}), Hub ({e_hub})"
+                    )
 
     if resolved_dir is None:
         raise FileNotFoundError(

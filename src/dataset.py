@@ -3,7 +3,7 @@
 from collections import defaultdict
 import json
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import albumentations as A
 import cv2
@@ -46,11 +46,11 @@ class VisDroneDataset(Dataset[Tuple[torch.Tensor, Dict[str, Any]]]):
 
     def __init__(
         self,
-        dataset_dir: Path,
+        dataset_dir: Union[str, Path],
         split: Literal["train", "val", "test"] = "train",
         sequence_names: Optional[List[str]] = None,
         stride: int = 1,
-        target_size: Tuple[int, int] = (640, 640),
+        target_size: Union[int, Tuple[int, int]] = (640, 640),
         transforms: Optional[A.Compose] = None,
         normalize_imagenet: bool = True,
         mask_ignore: bool = False,
@@ -74,14 +74,14 @@ class VisDroneDataset(Dataset[Tuple[torch.Tensor, Dict[str, Any]]]):
                 transformed image, while `orig_size` stays the original one.
         """
         super().__init__()
-        self.dataset_dir = dataset_dir
+        self.dataset_dir = Path(dataset_dir)
         self.split = split
-        self.target_size = target_size
+        self.target_size = (target_size, target_size) if isinstance(target_size, int) else tuple(target_size)
         self.transforms = transforms
         self.normalize_imagenet = normalize_imagenet
         self.mask_ignore = mask_ignore
         self.pre_transforms = pre_transforms
-        self.img_dir = dataset_dir / split / "images"
+        self.img_dir = self.dataset_dir / split / "images"
 
         # ImageNet normalization constants
         self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -256,6 +256,84 @@ def build_dataloader(
         collate_fn=detection_collate_fn,
         pin_memory=use_pin,
     )
+
+
+def create_visdrone_loaders(
+    dataset_dir: Union[str, Path],
+    target_size: Tuple[int, int] = (1024, 1024),
+    batch_size: int = 4,
+    val_batch_size: Optional[int] = None,
+    train_stride: int = 3,
+    val_stride: int = 3,
+    normalize_imagenet: bool = False,
+    num_workers: int = 2,
+    train_seqs: Optional[List[str]] = None,
+    val_seqs: Optional[List[str]] = None,
+) -> Tuple[
+    DataLoader[Tuple[torch.Tensor, Dict[str, Any]]],
+    DataLoader[Tuple[torch.Tensor, Dict[str, Any]]],
+    VisDroneDataset,
+    VisDroneDataset,
+]:
+    """Universal factory building sequence-isolated VisDrone train and validation DataLoaders.
+
+    Args:
+        dataset_dir: Path to directory containing 'train' and 'val' subdirectories.
+        target_size: (H, W) for aspect-preserving letterboxing.
+        batch_size: Batch size for training loader.
+        val_batch_size: Batch size for validation loader (defaults to 2x train batch size).
+        train_stride: Frame subsampling stride for training sequences (k=3 recommended).
+        val_stride: Frame subsampling stride for validation sequences.
+        normalize_imagenet: Whether to apply ImageNet mean/std (False for torchvision detectors).
+        num_workers: Number of DataLoader worker subprocesses.
+        train_seqs: Optional sequence names to restrict training split to.
+        val_seqs: Optional sequence names to restrict validation split to.
+
+    Returns:
+        (train_loader, val_loader, train_dataset, val_dataset)
+    """
+    from src.preprocessing import get_train_transforms, get_val_transforms
+
+    ds_path = Path(dataset_dir)
+    train_ds = VisDroneDataset(
+        dataset_dir=ds_path,
+        split="train",
+        sequence_names=train_seqs,
+        stride=train_stride,
+        target_size=target_size,
+        transforms=get_train_transforms(),
+        normalize_imagenet=normalize_imagenet,
+    )
+
+    val_ds = VisDroneDataset(
+        dataset_dir=ds_path,
+        split="val",
+        sequence_names=val_seqs,
+        stride=val_stride,
+        target_size=target_size,
+        transforms=get_val_transforms(),
+        normalize_imagenet=normalize_imagenet,
+    )
+
+    v_batch = val_batch_size if val_batch_size is not None else max(1, batch_size * 2)
+
+    train_loader = build_dataloader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    val_loader = build_dataloader(
+        val_ds,
+        batch_size=v_batch,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    return train_loader, val_loader, train_ds, val_ds
 
 
 def get_hardware_config(

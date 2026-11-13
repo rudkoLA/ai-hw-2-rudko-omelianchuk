@@ -3,7 +3,7 @@
 from collections import Counter, defaultdict
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional, Union
 import cv2
 import numpy as np
 import pandas as pd
@@ -597,3 +597,143 @@ def compute_velocity_flow_dynamics(
         "veh_median_error": float(np.median(v_err)),
         "speed_ratio": float(np.median(v_gt) / (np.median(p_gt) + 1e-4)) if len(ped_gt_speeds) and len(veh_gt_speeds) else 1.0,
     }
+
+
+def run_full_eda(
+    coco_train: Dict[str, Any],
+    dataset_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Universal single-call EDA suite summarizing VisDrone dataset characteristics.
+
+    Computes:
+    1. Class distribution & imbalance metrics
+    2. Object scale & size categorization (COCO standards)
+    3. Scene density & objects-per-frame variation
+    4. Temporal IoU drift across frame strides (justifying k=3 subsampling)
+    """
+    print("=" * 60)
+    print("Running VisDrone Comprehensive Exploratory Data Analysis (EDA)")
+    print("=" * 60)
+
+    # 1. Class Distribution
+    class_df, class_summary = compute_class_distribution(coco_train)
+    print(f"\n[1. Class Distribution]: {class_summary['total_instances']:,} total target instances")
+    print(f"   Majority Class: {class_summary['majority_class']} | Minority: {class_summary['minority_class']}")
+    print(f"   Imbalance Ratio: {class_summary['imbalance_ratio']:.1f}x (extreme class imbalance)")
+
+    # 2. Object Scale & Size Distribution
+    size_df, size_summary = compute_size_metrics(coco_train)
+    print(f"\n[2. Object Scale Distribution (COCO Standards)]:")
+    print(f"   Small  (< 32x32 px):  {size_summary['small_percentage']:.1f}%")
+    print(f"   Medium (32x32 to 96x96): {size_summary['medium_percentage']:.1f}%")
+    print(f"   Large  (> 96x96 px):  {size_summary['large_percentage']:.1f}%")
+    print(f"   Median Area: {size_summary['median_area']:.0f} px² (~{np.sqrt(size_summary['median_area']):.0f}x{np.sqrt(size_summary['median_area']):.0f} px)")
+
+    # 3. Scene Density
+    img_counts = Counter(a["image_id"] for a in coco_train["annotations"] if a.get("iscrowd", 0) == 0)
+    counts_list = list(img_counts.values()) if img_counts else [0]
+    density_summary = {
+        "mean_density": float(np.mean(counts_list)),
+        "median_density": float(np.median(counts_list)),
+        "max_density": int(np.max(counts_list)),
+        "p95_density": float(np.percentile(counts_list, 95)),
+    }
+    print(f"\n[3. Scene Density (Objects per Frame)]:")
+    print(f"   Mean: {density_summary['mean_density']:.1f} | Median: {density_summary['median_density']:.0f} | 95th Percentile: {density_summary['p95_density']:.0f} | Max: {density_summary['max_density']}")
+
+    # 4. Temporal Subsampling Overlap (Stride IoU Drift)
+    stride_summary = compute_stride_iou_drift(coco_train, strides=[1, 2, 3, 5, 10], max_tracks=300)
+    print(f"\n[4. Temporal Bounding Box IoU Drift (Frame Subsampling)]:")
+    for s, res in stride_summary.items():
+        print(f"   Stride k={s:2d}: Mean IoU = {res['mean_iou']:.3f} | Median IoU = {res['median_iou']:.3f}")
+
+    # 5. Cross-Sequence Heterogeneity
+    seq_df, seq_summary = compute_sequence_heterogeneity(coco_train)
+    print(f"\n[5. Cross-Sequence Variation ({seq_summary['total_sequences']} Sequences)]:")
+    print(f"   Density Range: {seq_summary['min_mean_density']:.1f} to {seq_summary['max_mean_density']:.1f} objects/frame")
+    print(f"   Small Object % Range: {seq_summary['min_small_pct']:.1f}% to {seq_summary['max_small_pct']:.1f}%")
+    print(f"   Vehicle % Range: {seq_summary['min_vehicle_pct']:.1f}% to {seq_summary['max_vehicle_pct']:.1f}%")
+
+    return {
+        "class_df": class_df,
+        "class_summary": class_summary,
+        "size_df": size_df,
+        "size_summary": size_summary,
+        "density_summary": density_summary,
+        "stride_summary": stride_summary,
+        "sequence_df": seq_df,
+        "sequence_summary": seq_summary,
+    }
+
+
+def compute_sequence_heterogeneity(
+    coco_data: Dict[str, Any]
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Analyzes cross-sequence variations in object density, scale, and class dominance.
+
+    Returns:
+        df: DataFrame summarizing frame count, density (min, mean, max), scale breakdown
+            (small, medium, large %), and class dominance (% pedestrian vs % vehicle) per sequence.
+        summary: Overall statistics of variation across sequences.
+    """
+    img_to_seq = {img["id"]: str(img["video"]) for img in coco_data["images"]}
+    seq_frames: Dict[str, int] = defaultdict(int)
+    for img in coco_data["images"]:
+        seq_frames[str(img["video"])] += 1
+
+    seq_anns: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for a in coco_data["annotations"]:
+        if a.get("iscrowd", 0) == 0:
+            seq = img_to_seq.get(a["image_id"])
+            if seq:
+                seq_anns[seq].append(a)
+
+    rows = []
+    for seq in sorted(seq_frames.keys()):
+        anns = seq_anns[seq]
+        n_frames = seq_frames[seq]
+
+        f_counts: Dict[int, int] = defaultdict(int)
+        for a in anns:
+            f_counts[a["image_id"]] += 1
+        counts = [f_counts[img["id"]] for img in coco_data["images"] if str(img["video"]) == seq]
+
+        areas = [float(a["bbox"][2] * a["bbox"][3]) for a in anns]
+        n_total = len(areas)
+        s_pct = (sum(1 for ar in areas if ar < 1024.0) / n_total * 100.0) if n_total else 0.0
+        m_pct = (sum(1 for ar in areas if 1024.0 <= ar <= 9216.0) / n_total * 100.0) if n_total else 0.0
+        l_pct = (sum(1 for ar in areas if ar > 9216.0) / n_total * 100.0) if n_total else 0.0
+
+        ped_pct = (sum(1 for a in anns if a["category_id"] in [1, 2]) / n_total * 100.0) if n_total else 0.0
+        veh_pct = (sum(1 for a in anns if a["category_id"] in [3, 4, 5, 6, 7, 8]) / n_total * 100.0) if n_total else 0.0
+
+        mean_d = float(np.mean(counts)) if counts else 0.0
+        min_d = int(np.min(counts)) if counts else 0
+        max_d = int(np.max(counts)) if counts else 0
+
+        rows.append({
+            "sequence": seq,
+            "frames": n_frames,
+            "mean_density": round(mean_d, 1),
+            "min_density": min_d,
+            "max_density": max_d,
+            "small_pct": round(s_pct, 1),
+            "medium_pct": round(m_pct, 1),
+            "large_pct": round(l_pct, 1),
+            "pedestrian_pct": round(ped_pct, 1),
+            "vehicle_pct": round(veh_pct, 1),
+        })
+
+    df = pd.DataFrame(rows)
+    summary = {
+        "total_sequences": len(df),
+        "min_mean_density": float(df["mean_density"].min()) if len(df) else 0.0,
+        "max_mean_density": float(df["mean_density"].max()) if len(df) else 0.0,
+        "min_small_pct": float(df["small_pct"].min()) if len(df) else 0.0,
+        "max_small_pct": float(df["small_pct"].max()) if len(df) else 0.0,
+        "min_vehicle_pct": float(df["vehicle_pct"].min()) if len(df) else 0.0,
+        "max_vehicle_pct": float(df["vehicle_pct"].max()) if len(df) else 0.0,
+    }
+    return df, summary
+
+
