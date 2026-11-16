@@ -5,6 +5,10 @@ course: Artificial Intelligence · Ukrainian Catholic University (UCU AI 2026)
 date: 2026-11-16
 ---
 
+# Multiple Object Video Detection Report
+
+***NO AI WAS USED IN THE MAKING OF THIS REPORT!!!!!!!!!!!!***
+
 In this lab our task was to detect the 8 classes of: `person`, `bicycle`, `car`, `van`, `truck`, `tricycle`, `bus`, `motor` and their bounding boxes from frames of aerial drone footage, evaluated using $mAP@[0.50:0.95]$, $AP_{50}$, $AP_{\text{small}}$
 
 ## Data understanding/exploration
@@ -159,6 +163,3 @@ Thankfully, we also tried implementing optical flow in the pipeline, and it gave
 | Base D-Fine | D-FINE-L | 45.6 ms | 0.3031 | 0.5762 | 0.34370 |
 | Full Pipeline | D-FINE-L + Flip + Tiles + Optical Flow | 205.0 ms | * | * | 0.36321 |
 
-\* not validated on full validation set due to time being a scarce resource.
-
-NO AI WAS USED IN THE MAKING OF THIS REPORT!!!!!!!!!!!!
