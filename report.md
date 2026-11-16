@@ -25,18 +25,53 @@ Images go into the `images/` folder:
 
 ## One Stage Anchor Free
 
-For this model I chose YOLO26s - the latest YOLO model.. It was a conscious decision to pick it instead of an older YOLOv8. I ran multiple experiments, none of which turned out very good.
+For this model I chose YOLO26s - the latest YOLO model. It was a conscious decision to pick it instead of an older YOLOv8. I ran multiple experiments, none of which turned out very successful.
 
-YOLO more like BOZO
+I was really betting on this model at the start, so I added a QUICK_TEST option to my notebook config for quick experiments. If it's true, the stride is increased to 15 and the model is only trained on first 10% of the dataset (this was later removed since it decreased the valuable variety of training data. I increased stride instead). This let me do quick experiments with 10 epochs running in ~10 minutes instead of a few hours.
 
-test1 = 1024
-test2 = 640
-test3 = nms free
-test4 = 1024 + p2
-test5 = test1 + mask ignore
+Below you can see my experiments with this setting on:
 
-check4_2 = full train test4 (early stopped after 5 epochs)
-check_nop2 = full train test1
+### Test 1 (1024x1024 px)
+
+![alt text](images/yolo/test1.png)
+
+### Test 2 (640x640 px)
+
+![alt text](images/yolo/test2.png)
+
+Results were obviously worse so all future tests use 1024x1024 px.
+
+### Test 3 (disabled NMS)
+
+![alt text](images/yolo/test3.png)
+
+YOLO26s predicts with its own one-to-one head, meaning it already predicts a single box for an object, so it doesn't need NMS.
+
+### Test 4 (P2 head)
+
+![alt text](images/yolo/test4.png)
+
+Here I tried out enabling the forth P2 head of the YOLO model. Results look bad, but it's only because it probably takes longer to converge. A bit too long, in fact.
+
+### Test 5 (same params as test 1 + ignore mask)
+
+![alt text](images/yolo/test_mask.png)
+
+I added an ignore mask which masks ignored regions on the training images, so the model doesn't get negative feedback for predicting objects that might still be there in the crowd
+
+### Full run (test 4's config)
+
+![alt text](images/yolo/check4_2.png)
+
+Unfortunately, I didn't disable early stopping and the overnight run was finished before it could train for the full 20 epochs. I didn't try again since it wasn't possible to resume a run that's finished due to early stopping, and I wanted to compare the results of a no P2 model on a full proper run, since I was suspecting my QUICK_TEST runs weren't very reliable.
+
+### Full run (test 1's config)
+
+![alt text](images/yolo/check4_3_nop2.png)
+
+The results of this run appeared really weird to me. But besides, you can clearly see the model was overfitting aggressively judging by diminishing train losses and rising val losses.
+
+At this point I abandoned YOLO and continued my search for the endgame model.
 
 
 ## Query-based model
@@ -69,7 +104,7 @@ To make the submission, I used the model as it was at the 4th epoch, as it was d
 
 ![alt text](images/photo_2026-11-16_20-28-03.jpg)
 
-It's only now that I see the original submission had much higher private score (+0.1). I feel betrayed. Nevertheless, the submission_last.csv model ended up what we used for our final pipeline. Unfortunately.
+It's only now that I see the original submission had much higher private score (+0.1). I feel betrayed. Nevertheless, the submission_last.csv model ended up what we used for our final pipeline to build upon. Unfortunately.
 
 ## Our Pipeline
 
@@ -79,9 +114,11 @@ I decided not to build an ensemble since D-FINE was clearly way ahead of all of 
 
 ### Results
 
-During parameter search on validation set which can be seen in the notebook, it seemed that temporal rescoring was only harming mAP no matter the window size or weight.
+During parameter search on validation set which can be seen in the notebook, it seemed that temporal rescoring was yielding minimal results no matter the window size or weight.
 
-I still tried submitting with the best settings ("window": 2, "iou_thr": 0.5, "weight": 0.3) and it yielded a subtly better result on public leaderboard, but on private it only harmed it. A lot. (0.295 without TR, 0.289 with)
+![alt text](<images/image copy.png>)
+
+I still tried submitting with the best settings ("window": 2, "iou_thr": 0.5, "weight": 0.3) and it gave a subtly better result on public leaderboard, but on private it only harmed it. A lot. (0.295 without TR, 0.289 with)
 
 ![alt text](images/image.png)
 
