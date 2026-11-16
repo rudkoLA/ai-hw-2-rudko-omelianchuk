@@ -1,26 +1,50 @@
 ---
-title: Homework 1 -- Your Title Here
-author: John Doe
-course: Artificial Intelligence · UCU
-date: 2026-10-12
+title: Multiple Object Video Detection on VisDrone Aerial Footage
+author: Team Rudko_Omelianchuk (Adam Rudko & Kyrylo Omelianchuk)
+course: Artificial Intelligence · Ukrainian Catholic University (UCU AI 2026)
+date: 2026-11-16
 ---
 
+In this lab our task was to detect the 8 classes of: `person`, `bicycle`, `car`, `van`, `truck`, `tricycle`, `bus`, `motor` and their bounding boxes from frames of aerial drone footage, evaluated using $mAP@[0.50:0.95]$, $AP_{50}$, $AP_{\text{small}}$
 
+## Data understanding/exploration
+Here are the some of the data properties we explored:
+- aspect ratio - all frames are 16:9, roughly 69% are at least 1080p in resolution, which means downscaling is bad
+- class distribution - cars make up 45.7% of objects, humans - 29.7%, making up roughly 75% of all data
+- object sizes - small objects with area < 1024px$^2$ (32x32) make up roughly 25% of data, medium 1024px$^2$ - 9216px$^2$ - 64%, > 9216px$^2$ (96x96) - 11%
+- ignored regions - there are roughly 64 thousand ignored regions, ~47% of them are in the top quarter of the screen, usually indicating tiny far away objects
+- optical flow - since all frame batches are continuous we can use optical flow to construct flow vectors between images and transfer bounding boxes between frames
+- subsampling - frames are from a continuous video recording, in a single clip, most of them are nearly identical, therefore we can subsample at k = 3, retaining most data but cutting training time significantly
+## Preprocessing
+Here are the post pre processing we do in our pipeline:
+- class remapping - visdrone has 12 classes but we only detect 8
+- ignored regions - we ignore them
+- aspect ration handling - for most models we do letterboxing at 640x640 or 1024x1024 and scale the image up/down to fit it, while preserving the aspect ratio and then pad the rest of the space with a constant gray color
+- color normalization - reordering channels from opencv's bgr to rgb, rescaling pixel scalar values to 0-1 float values, standard imagenet normalization, changing the shape from (height, width, channels) to (channels, height, width)
+- augmentations - adding random zoom crops, horizontal flips, affine transformations, brightness contrast changes, hue saturation changes, motion blur, and mosaic/mixups to increase training data variety
+## Two Stage Anchor Based
+For this part we used Faster RCNN, which has two parts:
+- region proposal network (RPN)
+- RoIAlign heads (ResNet-50-FPN V2)
 
-## Results
+The base model scored $mAP$ = 0.2650, $AP_{50}$ = 0.6014, $AP_{\text{small}}$ = 0.1407.
 
-| Model    | Accuracy | F1   |
-|----------|----------|------|
-| Baseline | 0.71     | 0.68 |
-| Ours     | 0.84     | 0.82 |
+The two experiments I did were:
+- experiment 1 - expanding the number of proposals (number of candidate objects) from 2000 to 3000 on the training dataset and from 1000 to 1500 on the validation dataset. This resulted in $mAP$ = 0.2904, $AP_{50}$ = 0.6089, $AP_{\text{small}}$ = 0.1534, which is the best out of three
+- experiment 2 - keeping the same tuned proposals as experiment 1, but now with sharpening the L1 transition parameter from 0.111 to 0.02, which forced a larger penalty on small objects, and adding label smoothing at 0.05 to cross-entropy, which should help better predict similar looking classes like vehicles. This resulted in $mAP$ = 0.2433, $AP_{50}$ = 0.5478, $AP_{\text{small}}$ = 0.1728, which is worse overall, but slightly better for smaller objects
 
-Images go into the `images/` folder:
+The experiment 1 model ended up receiving a 0.25488 score on kaggle, which even beat a previous query based model at the time.
 
-<!-- ![Training loss](images/loss.png) -->
+Seeing as this only trained for ~90minutes, I wanted to improve on the model and tried training it for 8 epochs for 8 hours at a higher resolution (1024x1024), altered anchors, differential learning rate, but it ended up scoring only and 0.21477 on kaggle. A second attempt at this, with the standard anchors, proper learning rate with cosine annealing, trained for the same amount still produced just 0.21891 on kaggle, so we gave up on it in favor of a better query based model.
+## One Stage Anchor Based
+For this part we used the ResNet-50-FPN V2 model from the two staged approach, but well without the proposal stage.
 
-## Conclusion
+The baseline model achieved $mAP$ = 0.1421, $AP_{50}$ = 0.4179.
 
-> Summarize your findings here.
+- experiment 1 - adding micro anchors 16$^2$-256$^2$px and expanded anchor aspect ratios from 3 to 5 and increasing anchor density, this resulted in $mAP$ = 0.1043 ($AP_{50}$ = 0.2839)
+- experiment 2 - setting focal loss $\alpha$ =0.35, $\gamma$ =2.0 partially improved to $mAP$ = 0.1196 $AP_{50}$ = 0.3419
+
+The baseline came out on top and resulted in a kaggle submission of 0.17249, which is considerably worse than the two staged approach, not worth training further.
 
 
 ## One Stage Anchor Free
@@ -123,5 +147,18 @@ I still tried submitting with the best settings ("window": 2, "iou_thr": 0.5, "w
 ![alt text](images/image.png)
 
 Thankfully, we also tried implementing optical flow in the pipeline, and it gave promising results, helping us secure 5th place.
+
+## Summary
+
+| Checkpoint | Model | Latency | Val $mAP_{50:95}$ | Val $AP_{50}$ | Kaggle score |
+| - | - | - | - | - | - |
+| Two Stage | Faster R-CNN ResNet-50-FPN V2 | 393.7 ms | 0.2904 | 0.6089 | 0.25488 |
+| One Stage Anchor | RetinaNet ResNet-50-FPN V2 | 191.6 ms | 0.1421 | 0.4179 | 0.17249 |
+| One Stage Free | YOLO26s | 8.9 ms | 0.2006 | 0.3762 | 0.22231 |
+| Query Based | RT-DETR-L | 14.8 ms | 0.2391 | 0.4489 | 0.22975 |
+| Base D-Fine | D-FINE-L | 45.6 ms | 0.3031 | 0.5762 | 0.34370 |
+| Full Pipeline | D-FINE-L + Flip + Tiles + Optical Flow | 205.0 ms | * | * | 0.36321 |
+
+\* not validated on full validation set due to time being a scarce resource.
 
 NO AI WAS USED IN THE MAKING OF THIS REPORT!!!!!!!!!!!!
